@@ -2,7 +2,9 @@
 param(
   [string]$AppPath = '',
   [double]$Scale = 0,
-  [switch]$HighContrast
+  [switch]$HighContrast,
+  [ValidateRange(2048, 4096)]
+  [int]$CaptureWidth = 2560
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -64,7 +66,8 @@ function Capture-Window([IntPtr]$handle, [string]$key) {
     try {
       if (-not [NativeUiSmoke]::PrintWindow($handle, $hdc, 2)) { throw "PrintWindow failed for $key" }
     } finally { $graphics.ReleaseHdc($hdc) }
-    $targetWidth = 640
+    # README assets are captured from the packaged application at a 2K-or-higher width.
+    $targetWidth = $CaptureWidth
     $targetHeight = [Math]::Max(1, [int]($height * ($targetWidth / [double]$width)))
     $small = New-Object System.Drawing.Bitmap $targetWidth, $targetHeight
     $g2 = [System.Drawing.Graphics]::FromImage($small)
