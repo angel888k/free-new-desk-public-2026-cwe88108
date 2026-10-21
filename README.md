@@ -2,6 +2,9 @@
 
 > 面向 Windows 11 x64 的 TVBox / FongMi 风格桌面影音播放器。
 > **软件本身不内置任何第三方影视源**，影视内容由用户自行导入；本地音乐、NAS、SMB、WebDAV 也可以直接加入音乐库。
+>
+> TVBox/FongMi-style desktop media player for Windows 11 x64.
+The software does not include any built-in third-party video sources; all video content shall be imported by users themselves. Local music files and media from NAS, SMB and WebDAV can also be directly added to the music library.
 
 **当前稳定版：V1.4.17** ｜ [下载 Release](../../releases/tag/v1.4.17) ｜ [问题反馈](../../issues)
 
