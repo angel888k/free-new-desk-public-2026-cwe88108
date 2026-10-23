@@ -8,7 +8,7 @@ import {createDrpy2RuntimeShim,type Drpy2SyncResponse} from '@free-new-desk/catv
 type JsonRecord=Record<string,unknown>;
 type Callable=(...args:unknown[])=>unknown|Promise<unknown>;
 type Engine=Record<string,unknown>;
-let sourceId='',entryUrl='',ruleExt='',bridgeDir='',proxyBaseUrl='',proxyToken='',profileId='',hostAbiVersion='';
+let sourceId='',entryUrl='',ruleExt='',bridgeDir='',proxyBaseUrl='',profileId='',hostAbiVersion='';
 let instantiation='',initContractId='',requiredCapabilities:string[]=[],methodNames:string[]=[];
 let modules:Record<string,string>={},engine:Engine={},messageQueue=Promise.resolve();
 const storage=new Map<string,string>();
@@ -23,9 +23,19 @@ function syncReq(url:string,request:JsonRecord={}):Drpy2SyncResponse{
   send({type:'broker.request',id,callId:callStore.getStore()??'',sourceId,url,options:{...request,timeoutMs:timeout},sync:true});
   while(Date.now()<deadline){
     if(existsSync(file)){
-      const raw=readFileSync(file,'utf8');try{unlinkSync(file);}catch{}
-      const parsed=JSON.parse(raw) as{result?:Drpy2SyncResponse;error?:string};
-      if(parsed.error)throw new Error(parsed.error);if(parsed.result)return parsed.result;throw new Error('DRPY_RESULT_INVALID');
+      // The parent writes the bridge response asynchronously. A visible file is not
+      // necessarily complete: retry incomplete JSON until the original deadline.
+      let raw:string|undefined;
+      try{raw=readFileSync(file,'utf8');}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+      if(raw!==undefined){
+        let parsed:{result?:Drpy2SyncResponse;error?:string}|undefined;
+        try{parsed=JSON.parse(raw) as{result?:Drpy2SyncResponse;error?:string};}
+        catch(error){if(!(error instanceof SyntaxError))throw error;}
+        if(parsed){
+          try{unlinkSync(file);}catch{}
+          if(parsed.error)throw new Error(parsed.error);if(parsed.result)return parsed.result;throw new Error('DRPY_RESULT_INVALID');
+        }
+      }
     }
     Atomics.wait(sleeper,0,0,20);
   }
@@ -66,7 +76,9 @@ async function loadEngine(requestId:string):Promise<void>{
   const load=async(url:string):Promise<vm.SourceTextModule>=>{
     const existing=cache.get(url);if(existing)return existing;const code=modules[url];
     if(typeof code!=='string')throw new Error(`DRPY_ENGINE_LINK_FAILED: module missing ${url}`);
-    const mod=new vm.SourceTextModule(code,{context,identifier:url,initializeImportMeta:meta=>{meta.url=url;},importModuleDynamically:async(specifier,referencing)=>{
+    // The pinned qist loader must mark code requests so the parent returns only reviewed dependency bytes.
+    const reviewedCode=code.replace('function $require(url) {\n    eval(request(url))\n}', 'function $require(url) {\n    eval(request(url, {fndExecutable: true}))\n}');
+    const mod=new vm.SourceTextModule(reviewedCode,{context,identifier:url,initializeImportMeta:meta=>{meta.url=url;},importModuleDynamically:async(specifier,referencing)=>{
       const child=await load(resolveSpecifier(specifier,referencing.identifier));
       if(child.status==='unlinked')await child.link(linker);if(child.status==='linked')await child.evaluate({timeout:8000});return child;
     }});cache.set(url,mod);return mod;
@@ -102,7 +114,7 @@ async function handleMessage(message:unknown):Promise<void>{
   try{
     if(data.type==='init'){
       sourceId=String(data.sourceId??'');entryUrl=String(data.entryUrl??'');ruleExt=String(data.ruleExt??'');bridgeDir=String(data.bridgeDir??'');
-      proxyBaseUrl=String(data.proxyBaseUrl??'');proxyToken=String(data.proxyToken??'');profileId=String(data.profileId??'');hostAbiVersion=String(data.hostAbiVersion??'');
+      proxyBaseUrl=String(data.proxyBaseUrl??'');profileId=String(data.profileId??'');hostAbiVersion=String(data.hostAbiVersion??'');
       instantiation=String(data.instantiation??'');initContractId=String(data.initContractId??'');
       requiredCapabilities=Array.isArray(data.requiredCapabilities)?data.requiredCapabilities.filter((item):item is string=>typeof item==='string'):[];
       methodNames=Array.isArray(data.methodNames)?data.methodNames.filter((item):item is string=>typeof item==='string'):[];
@@ -112,9 +124,6 @@ async function handleMessage(message:unknown):Promise<void>{
     }
     if(data.type==='call'){
       const method=String(data.method??''),result=await call(method,Array.isArray(data.args)?data.args:[],id);
-      if(result&&typeof result==='object'&&proxyBaseUrl&&typeof(result as JsonRecord).url==='string'&&String((result as JsonRecord).url).startsWith(proxyBaseUrl)){
-        const value=result as JsonRecord;value.headers={...((value.headers&&typeof value.headers==='object')?value.headers as JsonRecord:{}),Authorization:`Bearer ${proxyToken}`};
-      }
       send({type:'response',id,result});return;
     }
     throw new Error('Unsupported drpy2 worker message');
@@ -122,5 +131,5 @@ async function handleMessage(message:unknown):Promise<void>{
     const messageText=error instanceof Error?error.message:String(error);diagnostic(id,'failed',performance.now(),{errorCode:messageText.split(':',1)[0]});send({type:'response',id,error:messageText});
   }
 }
-process.on('message',message=>{messageQueue=messageQueue.then(()=>handleMessage(message)).catch(error=>send({type:'log',level:'error',args:[error instanceof Error?error.message:String(error)]}));});
-process.on('disconnect',()=>process.exit(0));
+const queueMessage=(message:unknown)=>{messageQueue=messageQueue.then(()=>handleMessage(message)).catch(error=>send({type:'log',level:'error',args:[error instanceof Error?error.message:String(error)]}));};
+process.on('message',queueMessage);process.on('disconnect',()=>process.exit(0));

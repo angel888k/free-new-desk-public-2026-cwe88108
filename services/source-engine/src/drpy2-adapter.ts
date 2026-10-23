@@ -1,7 +1,9 @@
-import {fork,type ChildProcess} from 'node:child_process';
+import type {ChildProcess} from 'node:child_process';
+import {launchTrustedWorker} from './trusted-worker.js';
+import {assertExecutableTrusted,loadDrpyExecutable} from './executable-trust.js';
+import os from 'node:os';
 import {randomUUID} from 'node:crypto';
 import {mkdir,rename,rm,writeFile} from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import type {CategoryResult,DetailResult,HomeResult,PlaybackDescriptorV2,PlayResult,SearchResult,SourceAdapter,SourceConfig,SourceContext} from '@free-new-desk/contracts';
@@ -11,6 +13,7 @@ import {resolveDrpy2Profile,type Drpy2Profile} from './drpy2-profile.js';
 import type {EngineBinding} from './validated-engine-store.js';
 import {normalizeSpiderCategory,normalizeSpiderDetail,normalizeSpiderHome,normalizeSpiderPlay,normalizeSpiderSearch} from './result-normalizer.js';
 import {legacyPlayResultToDescriptorV2} from './playback-descriptor.js';
+import {authorizeSourceProxyResult} from './source-proxy-result.js';
 
 type JsonRecord=Record<string,unknown>;
 interface Pending{resolve:(value:unknown)=>void;reject:(error:Error)=>void;timer:NodeJS.Timeout;generation:number;signal?:AbortSignal;abort?:()=>void;}
@@ -28,7 +31,7 @@ export class Drpy2Adapter implements SourceAdapter{
   readonly #config:SourceConfig;
   readonly #diagnostics:JsonRecord[]=[];
   #manager:DrpyEngineManager|undefined;
-  #child:ChildProcess|undefined;#context:SourceContext|undefined;#bridgeDir='';#generation=0;#profile:Drpy2Profile|undefined;
+  #child:ChildProcess|undefined;#context:SourceContext|undefined;#bridgeDir='';#generation=0;#profile:Drpy2Profile|undefined;#codeResponses:Record<string,string>={};
   constructor(config:SourceConfig){this.#config=config;}
   #engineUrl():string{const url=this.#config.endpoint;if(!/^https?:\/\//i.test(url))throw new Error('DRPY_UNSUPPORTED_ENGINE: engine URL must be HTTP(S)');return assertSafeDrpyUrl(url).toString();}
   #binding(ctx:SourceContext):EngineBinding{return{sourceId:ctx.sourceId,configRevision:ctx.configRevision??this.#config.configRevision??'legacy',accountProfile:ctx.accountProfile??'default'};}
@@ -37,12 +40,12 @@ export class Drpy2Adapter implements SourceAdapter{
     for(const pending of this.#pending.values()){clearTimeout(pending.timer);pending.abort?.();pending.reject(new Error(reason));}this.#pending.clear();
     if(this.#bridgeDir)await rm(this.#bridgeDir,{recursive:true,force:true}).catch(()=>undefined);this.#bridgeDir='';
   }
-  async #activate(bundle:DrpyEngineBundle,profile:Drpy2Profile,ctx:SourceContext):Promise<void>{
+  async #activate(bundle:DrpyEngineBundle,profile:Drpy2Profile,ctx:SourceContext,snapshot?:Awaited<ReturnType<typeof loadDrpyExecutable>>):Promise<void>{
+    const reviewed=snapshot??await loadDrpyExecutable(this.#config,bundle,this.#broker);await assertExecutableTrusted(this.#config,ctx,reviewed.artifacts);this.#codeResponses=reviewed.codeResponses;
     await this.#resetWorker('Drpy2 Worker replaced');this.#profile=profile;
-    this.#bridgeDir=path.join(os.tmpdir(),'free-new-desk-drpy2',`${process.pid}-${ctx.sourceId.replace(/[^a-z0-9_.-]/gi,'_')}-${randomUUID()}`);await mkdir(this.#bridgeDir,{recursive:true});
     const entry=fileURLToPath(new URL('../../drpy2-worker/dist/worker.js',import.meta.url)),generation=++this.#generation;
-    const env:{[key:string]:string|undefined}={ELECTRON_RUN_AS_NODE:'1',SystemRoot:process.env.SystemRoot,PATH:process.env.PATH,TEMP:process.env.TEMP,TMP:process.env.TMP};
-    const child=fork(entry,[],{stdio:['ignore','ignore','ignore','ipc'],execArgv:['--experimental-vm-modules','--max-old-space-size=192'],env});
+    this.#bridgeDir=path.join(os.tmpdir(),`free-new-desk-drpy-${randomUUID()}`);await mkdir(this.#bridgeDir,{recursive:true});
+    const child=launchTrustedWorker(entry,['--experimental-vm-modules','--max-old-space-size=192']);child.on('error',()=>{child.kill();});
     child.on('message',message=>{void this.#onMessage(message,generation);});
     child.on('exit',()=>{
       if(generation!==this.#generation||this.#child!==child)return;
@@ -50,15 +53,15 @@ export class Drpy2Adapter implements SourceAdapter{
       for(const[id,pending]of this.#pending)if(pending.generation===generation)this.#pending.delete(id);this.#child=undefined;
     });
     this.#child=child;
-    await this.#request({type:'init',sourceId:ctx.sourceId,entryUrl:bundle.entryUrl,modules:bundle.modules,ruleExt:this.#config.ext??'',bridgeDir:this.#bridgeDir,proxyBaseUrl:ctx.proxyBaseUrl??'',proxyToken:ctx.proxyToken??'',profileId:profile.id,hostAbiVersion:profile.hostAbiVersion,instantiation:profile.instantiation,initContractId:profile.initContractId,requiredCapabilities:profile.requiredCapabilities,methodNames:Object.values(profile.methods)},25_000);
+    await this.#request({type:'init',sourceId:ctx.sourceId,entryUrl:bundle.entryUrl,modules:bundle.modules,ruleExt:reviewed.ruleExt,bridgeDir:this.#bridgeDir,proxyBaseUrl:ctx.proxyBaseUrl??'',profileId:profile.id,hostAbiVersion:profile.hostAbiVersion,instantiation:profile.instantiation,initContractId:profile.initContractId,requiredCapabilities:profile.requiredCapabilities,methodNames:Object.values(profile.methods)},25_000);
   }
   async init(ctx:SourceContext):Promise<void>{
     this.#context=ctx;const defaultHeaders=ctx.requestHeaders??this.#config.headers;
     ctx.requestContextRef=this.#broker.bindContext(ctx.sourceId,{configRevision:ctx.configRevision??this.#config.configRevision??'legacy',accountProfile:ctx.accountProfile??'default',...(defaultHeaders?{defaultHeaders}:{})});
     const manager=new DrpyEngineManager(this.#broker,ctx.engineStoreDir);this.#manager=manager;const binding=this.#binding(ctx);let staged:DrpyEngineBundle|undefined;let stagedError:unknown;
     try{
-      staged=await manager.load(ctx.sourceId,this.#engineUrl());const profile=resolveDrpy2Profile(staged.manifest);await this.#activate(staged,profile,ctx);await manager.markValidated(staged,profile,binding);return;
-    }catch(error){stagedError=error;await this.#resetWorker('Drpy2 staging failed');}
+      staged=await manager.load(ctx.sourceId,this.#engineUrl());const review=await loadDrpyExecutable(this.#config,staged,this.#broker);await assertExecutableTrusted(this.#config,ctx,review.artifacts);const profile=resolveDrpy2Profile(staged.manifest);await this.#activate(staged,profile,ctx,review);await manager.markValidated(staged,profile,binding);return;
+    }catch(error){stagedError=error;await this.#resetWorker('Drpy2 staging failed');if(error instanceof Error&&error.message.includes('SOURCE_EXECUTABLE_NOT_APPROVED'))throw error;}
     const lkg=await manager.loadLastKnownGood(binding);
     if(!lkg||staged&&lkg.bundle.manifest.sha256===staged.manifest.sha256)throw stagedError;
     try{
@@ -95,6 +98,7 @@ export class Drpy2Adapter implements SourceAdapter{
       try{
         if(callId&&!callPending)throw new DOMException('Aborted','AbortError');
         const url=assertSafeDrpyUrl(String(data.url??'')).toString(),options=data.options&&typeof data.options==='object'?data.options as JsonRecord:{};
+        if(options.fndExecutable===true||url in this.#codeResponses||/\.m?js(?:[?#]|$)/i.test(url)){const content=this.#codeResponses[url];if(content===undefined)throw new Error('[SOURCE_EXECUTABLE_NOT_APPROVED] Runtime dependency has not been reviewed');await this.#writeSyncResponse(id,{result:{content,headers:{'content-type':'application/javascript; charset=utf-8'},code:200,url}},generation,bridgeDir);return;}
         const method=typeof options.method==='string'?options.method:undefined,headers=cleanHeaders(options.headers),body=requestBody(options,headers),timeoutMs=Math.max(1000,Math.min(30_000,Number(options.timeoutMs??options.timeout??15_000)));
         const response=await this.#safeBrokerRequest(url,options,method,headers,body,timeoutMs,callPending?.signal),bytes=Buffer.from(await response.arrayBuffer()),content=decodeResponse(bytes,options,response.headers.get('content-type')??'');
         const responseHeaders:Record<string,string|string[]>=Object.fromEntries(response.headers.entries());const setCookie=(response.headers as Headers&{getSetCookie?:()=>string[]}).getSetCookie?.();if(setCookie?.length)responseHeaders['set-cookie']=setCookie;
@@ -124,7 +128,7 @@ export class Drpy2Adapter implements SourceAdapter{
       this.#pending.set(id,{resolve,reject,timer,generation,...(signal?{signal,abort:cleanup}:{})});child.send({...payload,id});
     });
   }
-  #call(method:string,args:unknown[],signal?:AbortSignal):Promise<unknown>{return this.#request({type:'call',method,args},35_000,signal).then(parseResult);}
+  #call(method:string,args:unknown[],signal?:AbortSignal):Promise<unknown>{return this.#request({type:'call',method,args},35_000,signal).then(parseResult).then(value=>authorizeSourceProxyResult(value,this.#context));}
   #method(name:keyof Drpy2Profile['methods']):string{const profile=this.#profile;if(!profile)throw new Error('DRPY_PROFILE_NOT_INITIALIZED');return profile.methods[name];}
   async getHome(signal?:AbortSignal):Promise<HomeResult>{
     let home=normalizeSpiderHome(await this.#call(this.#method('home'),[true],signal));

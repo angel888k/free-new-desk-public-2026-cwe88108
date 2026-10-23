@@ -27,7 +27,11 @@ export interface PlayResult{url:string;parse:boolean;headers?:Record<string,stri
 export interface PlaybackCandidateV2{id:string;label?:string;target:{kind:'media';url:string;mimeHint?:string}|{kind:'web-page';url:string}|{kind:'parser-input';value:string;parserIds:string[]}|{kind:'runtime-proxy';callbackHandle:string}|{kind:'external-bridge';resourceHandle:string};requestContextRef?:string;expiresAtMs?:number;seekability:'unknown'|'seekable'|'unseekable';headers?:Record<string,string>;}
 export interface PlaybackDescriptorV2{schemaVersion:2;sourceId:string;configRevision:string;originProfileId:string;rawHints:{parse?:unknown;jx?:unknown;flag?:string;playUrl?:string};resolutionIntent:'direct'|'sniff'|'parser'|'runtime-proxy'|'unknown';candidates:PlaybackCandidateV2[];subtitles?:{url:string;contextRef?:string;name?:string}[];drmStatus?:'none'|'declared-unsupported';requestId?:string;runtimeLeaseId?:string;}
 
-export interface SourceContext{sourceId:string;proxyBaseUrl?:string;proxyToken?:string;requestHeaders?:Record<string,string>;configRevision?:string;accountProfile?:string;requestContextRef?:string;engineStoreDir?:string;}
+export interface SourceContext{sourceId:string;proxyBaseUrl?:string;proxyToken?:string;requestHeaders?:Record<string,string>;configRevision?:string;accountProfile?:string;requestContextRef?:string;engineStoreDir?:string;executableTrustStoreDir?:string;}
+export interface ExecutableArtifact{location:string;sha256:string;size:number;role:'manifest'|'entry'|'dependency'|'rule';encoding:'utf8'|'base64';content:string;relativePath?:string;}
+export interface ExecutableReview{sourceId:string;name:string;kind:SourceKind;revision:string;configDigest:string;digest:string;artifacts:ExecutableArtifact[];preparedAt:string;}
+export interface ExecutableApproval{schema:1;sourceId:string;revision:string;configDigest:string;digest:string;approvedAt:string;}
+export interface ExecutableTrustStatus{sourceId:string;required:boolean;approved:boolean;approvedAt?:string;digest?:string;reviewReady?:boolean;}
 export interface SourceAdapter{init(ctx:SourceContext):Promise<void>;getHome(signal?:AbortSignal):Promise<HomeResult>;getCategory(categoryId:string,page:number,filters?:Record<string,string>,signal?:AbortSignal):Promise<CategoryResult>;getDetail(ids:string[],signal?:AbortSignal):Promise<DetailResult>;search(keyword:string,page?:number,signal?:AbortSignal):Promise<SearchResult>;getPlay(flag:string,id:string,signal?:AbortSignal):Promise<PlayResult>;getPlayV2?(flag:string,id:string,signal?:AbortSignal):Promise<PlaybackDescriptorV2>;destroy():Promise<void>;}
 export type SourceFailureStage='import'|'runtime'|'request'|'detail'|'resolve'|'proxy'|'player'|'invoke';
 export type SourceFailureCategory='compatibility'|'network'|'auth'|'upstream'|'cancelled'|'resource'|'player';
@@ -57,9 +61,9 @@ export type PlaybackDomain='vod'|'live'|'music';
 export type PlaybackSessionStatus='idle'|'requested'|'loading'|'playing'|'paused'|'stopped'|'failed'|'ended'|'superseded';
 export type PlaybackInitiator='user'|'auto-next'|'auto-route'|'retry'|'history'|'restore';
 export interface PlaybackSessionSnapshot{
-  generation:number;sessionId:string;requestId:string;loadId?:string;domain:PlaybackDomain|null;status:PlaybackSessionStatus;initiator?:PlaybackInitiator;
-  sourceId?:string;channelId?:string;routeIndex?:number;routeCount?:number;videoId?:string;episodeId?:string;trackId?:string;queueItemId?:string;
-  startedAt?:number;updatedAt:number;endReason?:'eof'|'stop'|'replaced'|'failed'|'unknown';error?:string;
+  generation:number;sessionId:string;requestId:string;loadId?:string;hostEpoch?:string;domain:PlaybackDomain|null;status:PlaybackSessionStatus;initiator?:PlaybackInitiator;
+  sourceId?:string;channelId?:string;routeIndex?:number;routeCount?:number;videoId?:string;episodeId?:string;trackId?:string;queueItemId?:string;ownerWindowId?:number;
+  startedAt?:number;updatedAt:number;controlRevision?:number;desiredPaused?:boolean;endReason?:'eof'|'stop'|'replaced'|'failed'|'unknown';error?:string;
 }
 
 export type MusicSourceKind='local'|'webdav'|'smb';
@@ -71,18 +75,20 @@ export interface MusicTrack extends MusicMetadata{id:string;sourceId:string;path
 export type MusicLyricsKind='synced'|'plain'|'instrumental'|'not-found';
 export interface MusicLyricsInfo{timeBase?:'track'|'file';text:string;kind:MusicLyricsKind;provider?:string;score?:number;}
 export type MusicQueueMode='sequence'|'repeat-one'|'shuffle';
-export const MusicPlayRequestSchema=z.object({trackId:z.string().min(1),initiator:z.enum(['user','auto-next','restore']).optional()});
+export const MusicPlayRequestSchema=z.object({trackId:z.string().min(1),initiator:z.enum(['user','auto-next','restore']).optional(),parentRequestId:z.string().optional(),expectedLoadId:z.string().optional(),expectedControlRevision:z.number().int().nonnegative().optional()});
 export type MusicPlayRequest=z.infer<typeof MusicPlayRequestSchema>;
 export const MusicNetworkSourceRequestSchema=z.object({kind:z.enum(['webdav','smb']),name:z.string().min(1).max(120),root:z.string().min(1).max(4096),username:z.string().max(512).optional(),password:z.string().max(2048).optional(),rememberCredential:z.boolean().optional(),disconnectConflicts:z.boolean().optional()});
 export type MusicNetworkSourceRequest=z.infer<typeof MusicNetworkSourceRequestSchema>;
 
 export interface PlayerTrack{id:string;type:string;title?:string;language?:string;selected:boolean;}
-export interface PlayerObservation{sampleFresh?:boolean;sampleAgeMs?:number;sampleState?:'fresh'|'stale';samplePositionStable?:boolean;hostEpoch?:string;loadId?:string;sampleSeq?:number;sampleValid?:boolean;seekRevision?:number;domain?:PlaybackDomain|null;requestId?:string;sessionGeneration?:number;sessionStatus?:PlaybackSessionStatus;sessionLoadId?:string;}
-export interface PlayerStats extends PlayerObservation{position:number;duration:number;paused:boolean;muted:boolean;volume:number;speed:number;cacheDuration:number;pausedForCache?:boolean;cacheBytes?:number;cacheMaxBytes?:number;hwdec?:string;videoFormat?:string;audioFormat?:string;containerFormat?:string;width?:number;height?:number;fps?:number;videoBitrate?:number;audioBitrate?:number;sampleRate?:number;audioChannels?:number;path?:string;fileSize?:number;fullscreen?:boolean;pip?:boolean;inputKey?:string;inputSequence?:number;}
+export interface PlayerObservation{sampleFresh?:boolean;sampleAgeMs?:number;sampleState?:'fresh'|'stale'|'pending'|'degraded';samplePositionStable?:boolean;hostEpoch?:string;loadId?:string;sampleSeq?:number;sampleValid?:boolean;seekRevision?:number;domain?:PlaybackDomain|null;requestId?:string;sessionGeneration?:number;sessionStatus?:PlaybackSessionStatus;sessionLoadId?:string;}
+export interface NativeVideoSurfaceSnapshot{mode:'embedded'|'fullscreen'|'pip';requestedVisible:boolean;windowExists:boolean;windowVisible:boolean;parentExists:boolean;parentMatches:boolean;parentVisible:boolean;width:number;height:number;parentWidth:number;parentHeight:number;withinParent:boolean;}
+export interface PlayerStats extends PlayerObservation{videoSurface?:NativeVideoSurfaceSnapshot;position:number;duration:number;paused:boolean;muted:boolean;volume:number;speed:number;cacheDuration:number;pausedForCache?:boolean;cacheBytes?:number;cacheMaxBytes?:number;hwdec?:string;videoFormat?:string;audioFormat?:string;containerFormat?:string;width?:number;height?:number;fps?:number;videoBitrate?:number;audioBitrate?:number;sampleRate?:number;audioChannels?:number;path?:string;fileSize?:number;fullscreen?:boolean;pip?:boolean;inputKey?:string;inputSequence?:number;}
 export interface PlayerLoadStatus extends PlayerObservation{loadId:string;status:'idle'|'loading'|'loaded'|'failed'|'ended';error?:string;}
-export const PlayerCommandSchema=z.discriminatedUnion('command',[
+const PlayerCommandBaseSchema=z.discriminatedUnion('command',[
   z.object({command:z.literal('pause'),value:z.boolean()}),z.object({command:z.literal('seek'),value:z.number(),absolute:z.boolean().optional(),loadId:z.string().optional(),requestId:z.string().optional()}),z.object({command:z.literal('volume'),value:z.number().min(0).max(100)}),z.object({command:z.literal('mute'),value:z.boolean()}),z.object({command:z.literal('speed'),value:z.number().min(0.25).max(4)}),z.object({command:z.literal('stop')}),z.object({command:z.literal('subtitle-add'),value:z.string().min(1)}),z.object({command:z.literal('audio-track'),value:z.string()}),z.object({command:z.literal('subtitle-track'),value:z.string()}),z.object({command:z.literal('subtitle-delay'),value:z.number()}),z.object({command:z.literal('audio-delay'),value:z.number()}),z.object({command:z.literal('aspect-ratio'),value:z.string().min(1).max(32)}),z.object({command:z.literal('hwdec'),value:z.enum(['auto-safe','no'])}),z.object({command:z.literal('pip'),value:z.boolean()}),z.object({command:z.literal('fullscreen'),value:z.boolean()}),z.object({command:z.literal('screenshot'),value:z.string().min(1)}),z.object({command:z.literal('osd-text'),value:z.string().min(1).max(2000),durationMs:z.number().int().min(250).max(10000).optional()}),z.object({command:z.literal('window-sync'),x:z.number(),y:z.number(),width:z.number().int().min(1),height:z.number().int().min(1),scale:z.number().positive().max(8).optional(),visible:z.boolean()})
 ]);
+export const PlayerCommandSchema=PlayerCommandBaseSchema.and(z.object({requestId:z.string().optional(),loadId:z.string().optional()}));
 export type PlayerCommand=z.infer<typeof PlayerCommandSchema>;
 export type PlayerQuery='stats'|'tracks'|'load-status';
 
@@ -90,19 +96,21 @@ export const SourceIdRequestSchema=z.object({sourceId:z.string().min(1)});
 export const SourceSearchRequestSchema=z.object({sourceId:z.string().min(1),keyword:z.string().min(1).max(100),page:z.number().int().positive().optional()});
 export const SourceCategoryRequestSchema=z.object({sourceId:z.string().min(1),categoryId:z.string().min(1),page:z.number().int().positive().optional(),filters:z.record(z.string()).optional()});
 export const SourceDetailRequestSchema=z.object({sourceId:z.string().min(1),ids:z.array(z.string().min(1)).min(1).max(20)});
-export const PlaybackEpisodeRequestSchema=z.object({sourceId:z.string().min(1),videoId:z.string().min(1),videoName:z.string().min(1),flag:z.string(),episodeId:z.string().min(1),episodeName:z.string().min(1),fromEpisodeId:z.string().min(1).optional(),poster:z.string().max(4096).optional(),episodeListJson:z.string().max(262144).optional(),initiator:z.enum(['user','auto-next','history','restore']).optional()});
+export const PlaybackEpisodeRequestSchema=z.object({sourceId:z.string().min(1),videoId:z.string().min(1),videoName:z.string().min(1),flag:z.string(),episodeId:z.string().min(1),episodeName:z.string().min(1),fromEpisodeId:z.string().min(1).optional(),poster:z.string().max(4096).optional(),episodeListJson:z.string().max(262144).optional(),initiator:z.enum(['user','auto-next','history','restore']).optional(),parentRequestId:z.string().optional(),expectedLoadId:z.string().optional(),expectedControlRevision:z.number().int().nonnegative().optional()});
 export type PlaybackEpisodeRequest=z.infer<typeof PlaybackEpisodeRequestSchema>;
 export const PlayRequestSchema=z.object({url:z.string().min(1),headers:z.record(z.string()).optional(),headerFields:z.string().optional(),profile:z.enum(['vod','live','music']).optional(),startSeconds:z.number().min(0).optional(),endSeconds:z.number().positive().optional()}).refine(value=>value.endSeconds===undefined||value.startSeconds===undefined||value.endSeconds>value.startSeconds,{message:'endSeconds must be greater than startSeconds'});
 export type PlayRequest=z.infer<typeof PlayRequestSchema>;
 
-export type SourceEngineRequest={id:string;method:'source.ping'}|{id:string;method:'source.configure';params:{proxyBaseUrl?:string;proxyToken?:string;engineStoreDir?:string}}|{id:string;method:'source.replaceAll';params:{sources:SourceConfig[]}}|{id:string;method:'source.list'}|{id:string;method:'source.home';params:{sourceId:string}}|{id:string;method:'source.category';params:{sourceId:string;categoryId:string;page?:number;filters?:Record<string,string>}}|{id:string;method:'source.search';params:{sourceId:string;keyword:string;page?:number}}|{id:string;method:'source.detail';params:{sourceId:string;ids:string[]}}|{id:string;method:'source.play';params:{sourceId:string;flag:string;episodeId:string}}|{id:string;method:'source.playV2';params:{sourceId:string;flag:string;episodeId:string}}|{id:string;method:'source.audit';params:{sourceId:string}}|{id:string;method:'source.cancel';params:{callId:string}}|{id:string;method:'source.releaseLease';params:{leaseId:string}};
-export type SourceEngineResult={ok:true;version?:string}|SourceSummary[]|HomeResult|CategoryResult|SearchResult|DetailResult|PlayResult|PlaybackDescriptorV2|SourceAuditResult;
+export type SourceEngineRequest={id:string;method:'source.ping'}|{id:string;method:'source.configure';params:{proxyBaseUrl?:string;proxyToken?:string;engineStoreDir?:string;executableTrustStoreDir?:string}}|{id:string;method:'source.replaceAll';params:{sources:SourceConfig[]}}|{id:string;method:'source.list'}|{id:string;method:'source.prepareExecutable';params:{config:SourceConfig}}|{id:string;method:'source.resetExecutable';params:{sourceId:string}}|{id:string;method:'source.home';params:{sourceId:string}}|{id:string;method:'source.category';params:{sourceId:string;categoryId:string;page?:number;filters?:Record<string,string>}}|{id:string;method:'source.search';params:{sourceId:string;keyword:string;page?:number}}|{id:string;method:'source.detail';params:{sourceId:string;ids:string[]}}|{id:string;method:'source.play';params:{sourceId:string;flag:string;episodeId:string}}|{id:string;method:'source.playV2';params:{sourceId:string;flag:string;episodeId:string}}|{id:string;method:'source.audit';params:{sourceId:string}}|{id:string;method:'source.cancel';params:{callId:string}}|{id:string;method:'source.releaseLease';params:{leaseId:string}};
+export type SourceEngineResult={ok:true;version?:string}|SourceSummary[]|HomeResult|CategoryResult|SearchResult|DetailResult|PlayResult|PlaybackDescriptorV2|SourceAuditResult|ExecutableReview;
 export type SourceEngineResponse={id:string;result:SourceEngineResult}|{id:string;error:AppError};
 
 export { parseLrc,activeLyricIndex,type LrcLine } from './music-lyrics.js';
 
 
 export {musicTrackPosition,musicTrackDuration,musicFilePosition,musicLyricPosition} from './music-timeline.js';
+export {FavoriteIdentitySchema,VodFavoriteSchema,VodFavoritesSchema,LiveFavoriteSchema,FavoritesImportSchema,VodFavoriteMutationSchema,VOD_FAVORITES_KEY,VOD_FAVORITES_RECOVERY_KEY,FAVORITES_MAX_BYTES,favoriteIdentity} from './favorites.js';
+export type {VodFavorite,VodFavoriteMutation,VodFavoriteState,VodFavoriteMutationResult} from './favorites.js';
 
 export interface MusicLibraryQuery{sourceId?:string;query?:string;albumId?:string;artist?:string;favorite?:boolean;after?:string;limit?:number;}
 export interface MusicAlbumSummary{key:string;title:string;artist:string;track:MusicTrack;count:number;}

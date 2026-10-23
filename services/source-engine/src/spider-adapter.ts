@@ -1,10 +1,13 @@
-import {fork,type ChildProcess} from 'node:child_process';
+import type {ChildProcess} from 'node:child_process';
+import {launchTrustedWorker} from './trusted-worker.js';
+import {assertExecutableTrusted,loadSpiderExecutable} from './executable-trust.js';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
 import type {CategoryResult,DetailResult,HomeResult,PlaybackDescriptorV2,PlayResult,SearchResult,SourceAdapter,SourceConfig,SourceContext} from '@free-new-desk/contracts';
 import {RequestBroker} from '@free-new-desk/source-sdk';
 import {normalizeSpiderCategory,normalizeSpiderDetail,normalizeSpiderHome,normalizeSpiderPlay,normalizeSpiderSearch} from './result-normalizer.js';
 import {legacyPlayResultToDescriptorV2} from './playback-descriptor.js';
+import {authorizeSourceProxyResult} from './source-proxy-result.js';
 
 type JsonRecord=Record<string,unknown>;
 interface Pending{resolve:(value:unknown)=>void;reject:(error:Error)=>void;timer:NodeJS.Timeout;signal?:AbortSignal;abort?:()=>void;}
@@ -21,15 +24,11 @@ export class SpiderAdapter implements SourceAdapter{
   async init(ctx:SourceContext):Promise<void>{
     this.#context=ctx;const defaultHeaders=ctx.requestHeaders??this.#config.headers;
     this.#broker.bindContext(ctx.sourceId,{configRevision:ctx.configRevision??this.#config.configRevision??'legacy',accountProfile:ctx.accountProfile??'default',...(defaultHeaders?{defaultHeaders}:{})});
-    const location=this.#scriptLocation(),code=await this.#broker.text({sourceId:ctx.sourceId,url:location,timeoutMs:10_000});
+    const {code,artifacts}=await loadSpiderExecutable(this.#config,this.#broker);await assertExecutableTrusted(this.#config,ctx,artifacts);
     const entry=fileURLToPath(new URL('../../spider-worker/dist/worker.js',import.meta.url));
-    const child=fork(entry,[],{stdio:['ignore','ignore','ignore','ipc'],execArgv:['--max-old-space-size=128'],env:{...process.env,ELECTRON_RUN_AS_NODE:'1'}});    child.on('message',message=>{void this.#onMessage(message);});
+    const child=launchTrustedWorker(entry,['--max-old-space-size=128']);child.on('error',()=>{child.kill();});child.on('message',message=>{void this.#onMessage(message);});
     child.on('exit',()=>{for(const pending of this.#pending.values()){clearTimeout(pending.timer);pending.abort?.();pending.reject(new Error('Spider Worker exited'));}this.#pending.clear();this.#child=undefined;});
-    this.#child=child;await this.#request({type:'init',sourceId:ctx.sourceId,code,proxyBaseUrl:ctx.proxyBaseUrl??'',proxyToken:ctx.proxyToken??''});
-  }
-  #scriptLocation():string{
-    const candidates=[this.#config.ext,this.#config.endpoint].filter((value):value is string=>typeof value==='string'&&/^https?:\/\//i.test(value));
-    const location=candidates[0];if(!location)throw new Error('JS Spider requires a remote HTTP(S) script URL in ext or endpoint');return location;
+    this.#child=child;await this.#request({type:'init',sourceId:ctx.sourceId,code,proxyBaseUrl:ctx.proxyBaseUrl??''});
   }
   async #onMessage(message:unknown):Promise<void>{
     if(!message||typeof message!=='object')return;const data=message as JsonRecord;
@@ -41,7 +40,7 @@ export class SpiderAdapter implements SourceAdapter{
         const method=typeof options.method==='string'?options.method:undefined;
         const headers=options.headers&&typeof options.headers==='object'?options.headers as Record<string,string>:undefined;
         const body=typeof options.body==='string'?options.body:undefined;
-        const result=await this.#broker.text({sourceId:String(data.sourceId??this.#config.id),url:String(data.url??''),...(method?{method}:{}),...(headers?{headers}:{}),...(body!==undefined?{body}:{}),...(callPending?.signal?{signal:callPending.signal}:{})});
+        const result=await this.#broker.text({sourceId:this.#context?.sourceId??this.#config.id,url:String(data.url??''),...(method?{method}:{}),...(headers?{headers}:{}),...(body!==undefined?{body}:{}),...(callPending?.signal?{signal:callPending.signal}:{})});
         this.#child?.send({type:'broker.response',id,result});
       }catch(error){this.#child?.send({type:'broker.response',id,error:error instanceof Error?error.message:String(error)});}return;
     }
@@ -61,7 +60,7 @@ export class SpiderAdapter implements SourceAdapter{
       this.#pending.set(id,{resolve,reject,timer,...(signal?{signal,abort:cleanup}:{})});child.send({...payload,id});
     });
   }
-  #call(method:string,args:unknown[],signal?:AbortSignal):Promise<unknown>{return this.#request({type:'call',method,args},signal).then(parseResult);}
+  #call(method:string,args:unknown[],signal?:AbortSignal):Promise<unknown>{return this.#request({type:'call',method,args},signal).then(parseResult).then(value=>authorizeSourceProxyResult(value,this.#context));}
   async #callFallback(attempts:Array<[string,unknown[]]>,signal?:AbortSignal):Promise<unknown>{
     let last:unknown;for(const[method,args]of attempts){try{return await this.#call(method,args,signal);}catch(error){if(signal?.aborted)throw error;last=error;}}
     throw last instanceof Error?last:new Error('JS Spider method failed');

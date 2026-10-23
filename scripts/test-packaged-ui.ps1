@@ -1,19 +1,20 @@
 [CmdletBinding()]
 param(
   [string]$AppPath = '',
+  [string]$ReleaseDir = '',
+  [string]$CaptureDir = '',
   [double]$Scale = 0,
-  [switch]$HighContrast,
-  [ValidateRange(2048, 4096)]
-  [int]$CaptureWidth = 2560
+  [switch]$HighContrast
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$exe = if ($AppPath) { $AppPath } else { Join-Path $root 'dist/releases/win-unpacked/Free New Desk.exe' }
-$captureDir = Join-Path $root 'dist/ui-smoke'
+$exe = if ($AppPath) { [IO.Path]::GetFullPath($AppPath) } elseif ($ReleaseDir) { Join-Path $ReleaseDir 'win-unpacked/Free New Desk.exe' } else { Join-Path $root 'dist/releases/win-unpacked/Free New Desk.exe' }
+if (-not $CaptureDir) { $CaptureDir = if ($ReleaseDir) { Join-Path $ReleaseDir 'ui-smoke' } else { Join-Path $root 'dist/ui-smoke' } }
+$captureDir = [IO.Path]::GetFullPath($CaptureDir)
 $captureScale = if ($Scale -gt 0) { [string]$Scale } elseif ($env:FND_DPI_SCALE) { $env:FND_DPI_SCALE } else { '1' }
 $captureHighContrast = $HighContrast -or $env:FND_HIGH_CONTRAST -eq '1'
 $capturePrefix = 'scale-' + $captureScale.Replace('.', '-') + $(if ($captureHighContrast) { '-high-contrast' } else { '-normal' })
-if (-not (Test-Path $exe)) { throw "Packaged executable not found: $exe" }
+if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Packaged executable not found: $exe" }
 
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -66,8 +67,7 @@ function Capture-Window([IntPtr]$handle, [string]$key) {
     try {
       if (-not [NativeUiSmoke]::PrintWindow($handle, $hdc, 2)) { throw "PrintWindow failed for $key" }
     } finally { $graphics.ReleaseHdc($hdc) }
-    # README assets are captured from the packaged application at a 2K-or-higher width.
-    $targetWidth = $CaptureWidth
+    $targetWidth = 640
     $targetHeight = [Math]::Max(1, [int]($height * ($targetWidth / [double]$width)))
     $small = New-Object System.Drawing.Bitmap $targetWidth, $targetHeight
     $g2 = [System.Drawing.Graphics]::FromImage($small)
@@ -98,7 +98,7 @@ $previousSmoke = $env:FND_UI_SMOKE
 try {
   $env:FND_UI_SMOKE = '1'
   $dpiScale = $captureScale
-  $arguments = @("--user-data-dir=$smokeDir", "--force-device-scale-factor=$dpiScale")
+  $arguments = @('--user-data-dir="' + $smokeDir + '"', "--force-device-scale-factor=$dpiScale")
   $highContrastEnabled = $captureHighContrast
   if ($highContrastEnabled) { $arguments += '--force-high-contrast' }
   Write-Host "Starting packaged UI navigation smoke test at scale $dpiScale (high contrast: $highContrastEnabled): $exe"

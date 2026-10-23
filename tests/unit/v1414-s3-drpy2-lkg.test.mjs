@@ -8,6 +8,7 @@ import path from 'node:path';
 import {DRPY2_PROFILES,resolveDrpy2Profile} from '../../services/source-engine/dist/drpy2-profile.js';
 import {ValidatedEngineStore} from '../../services/source-engine/dist/validated-engine-store.js';
 import {Drpy2Adapter} from '../../services/source-engine/dist/drpy2-adapter.js';
+import {createExecutableReview,executableArtifact,writeExecutableApproval} from '../../services/source-engine/dist/executable-trust.js';
 
 const sha=value=>createHash('sha256').update(value).digest('hex');
 const controlled=new URL('../fixtures/drpy2/controlled-v1/',import.meta.url);
@@ -52,18 +53,19 @@ test('v1.4.14 S3 validated engine store survives restart and falls back to previ
   }finally{await rm(root,{recursive:true,force:true});}
 });
 
-test('v1.4.14 S3 adapter rolls profile failure back to same-binding persisted LKG',async t=>{
+test('trusted DRPY adapter rejects changed remote code rather than silently falling back to approved LKG',async t=>{
   const [engine,core]=await Promise.all([readFile(new URL('engine.js',controlled),'utf8'),readFile(new URL('core.js',controlled),'utf8')]);
   const storeDir=path.join(os.tmpdir(),`fnd-s3-adapter-${randomUUID()}`),originalFetch=globalThis.fetch;
   let bad=false;
   globalThis.fetch=async input=>{const url=String(input);if(url.endsWith('/core.js'))return new Response(core,{status:200});if(url.endsWith('/engine.js'))return new Response(bad?`export default {init(){return this},getRule(){return{}},home(){return{list:[]}}}`:engine,{status:200});return new Response('missing',{status:404});};
   t.after(()=>{globalThis.fetch=originalFetch;});
   const config={id:'controlled-s3',name:'Controlled S3',kind:'T3_JS',endpoint:engineUrl,enabled:true,trust:'A',configRevision:'rev-fixed',ext:'fixture-rule'};
-  const context={sourceId:config.id,configRevision:'rev-fixed',accountProfile:'default',engineStoreDir:storeDir};
+  const context={sourceId:config.id,configRevision:'rev-fixed',accountProfile:'default',engineStoreDir:storeDir,executableTrustStoreDir:path.join(storeDir,'approvals')};
   try{
+    await writeExecutableApproval(context.executableTrustStoreDir,createExecutableReview(config,[executableArtifact(engineUrl,Buffer.from(engine),'entry'),executableArtifact(coreUrl,Buffer.from(core),'dependency'),executableArtifact('inline:rule',Buffer.from('fixture-rule'),'rule')]));
     const first=new Drpy2Adapter(config);await first.init({...context});const home1=await first.getHome();assert.equal(home1.items[0]?.name,'Home One');await first.destroy();
     bad=true;
-    const second=new Drpy2Adapter(config);await second.init({...context});const home2=await second.getHome();assert.equal(home2.items[0]?.name,'Home One');await second.destroy();
+    const second=new Drpy2Adapter(config);await assert.rejects(()=>second.init({...context}),/SOURCE_EXECUTABLE_NOT_APPROVED/);await second.destroy();
   }finally{await rm(storeDir,{recursive:true,force:true});}
 });
 

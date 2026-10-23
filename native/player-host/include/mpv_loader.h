@@ -3,16 +3,18 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 struct mpv_handle;
 struct mpv_event;
 struct MpvLoadState{std::string loadId;std::string status;std::string error;};
 class MpvLoader {
  public:
-  MpvLoader()=default;~MpvLoader();MpvLoader(const MpvLoader&)=delete;MpvLoader& operator=(const MpvLoader&)=delete;
+  explicit MpvLoader(std::function<void()> surfaceChanged={}):surfaceChanged_(std::move(surfaceChanged)){}~MpvLoader();MpvLoader(const MpvLoader&)=delete;MpvLoader& operator=(const MpvLoader&)=delete;
   bool initialize(const std::filesystem::path& dllPath,std::string& error,bool nullAudioOutput=false);
   bool startLoad(const std::string& url,const std::string& headerFields,std::string& loadId,std::string& error);
   MpvLoadState loadState()const;
@@ -22,6 +24,7 @@ class MpvLoader {
   bool command(const std::vector<std::string>& args,std::string& error);
   bool available()const noexcept{return handle_!=nullptr;}
  private:
+  const std::function<void()> surfaceChanged_;
   HMODULE module_=nullptr;mpv_handle* handle_=nullptr;
   using create_fn=mpv_handle*(*)();using initialize_fn=int(*)(mpv_handle*);using terminate_destroy_fn=void(*)(mpv_handle*);using set_option_string_fn=int(*)(mpv_handle*,const char*,const char*);using set_property_string_fn=int(*)(mpv_handle*,const char*,const char*);using get_property_string_fn=char*(*)(mpv_handle*,const char*);using free_fn=void(*)(void*);using command_fn=int(*)(mpv_handle*,const char**);using command_async_fn=int(*)(mpv_handle*,std::uint64_t,const char**);using error_string_fn=const char*(*)(int);using wait_event_fn=mpv_event*(*)(mpv_handle*,double);
   terminate_destroy_fn terminateDestroy_=nullptr;set_property_string_fn setPropertyString_=nullptr;get_property_string_fn getPropertyString_=nullptr;free_fn free_=nullptr;command_fn command_=nullptr;command_async_fn commandAsync_=nullptr;error_string_fn errorString_=nullptr;wait_event_fn waitEvent_=nullptr;

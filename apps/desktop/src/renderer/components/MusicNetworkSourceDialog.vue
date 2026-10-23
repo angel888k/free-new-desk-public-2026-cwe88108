@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed,ref,watch } from 'vue';
 import type { MusicSource } from '@free-new-desk/contracts';
+import AppIcon from './AppIcon.vue';
 const props=defineProps<{open:boolean}>();const emit=defineEmits<{close:[];saved:[source:MusicSource,count:number]}>();
 const kind=ref<'webdav'|'smb'>('webdav'),name=ref(''),root=ref(''),username=ref(''),password=ref(''),rememberCredential=ref(true),saving=ref(false),error=ref('');
 const rootPlaceholder=computed(()=>kind.value==='webdav'?'https://example.com/dav/music/':'\\\\NAS\\Music');
@@ -14,7 +15,7 @@ async function save(){const safeName=name.value.trim(),safeRoot=root.value.trim(
 
 <template>
   <dialog :open="open" class="music-source-dialog" @cancel.prevent="close"><form method="dialog" @submit.prevent="save">
-    <header><div><small>网络音乐来源</small><h2>添加 WebDAV / SMB</h2></div><button type="button" aria-label="关闭" @click="close">×</button></header>
+    <header><div><small>网络音乐来源</small><h2>添加 WebDAV / SMB</h2></div><button type="button" aria-label="关闭" @click="close"><AppIcon name="action-close" :size="16"/></button></header>
     <label>类型<select v-model="kind"><option value="webdav">WebDAV</option><option value="smb">SMB / Windows 共享</option></select></label>
     <label>来源名称<input v-model="name" maxlength="80" autocomplete="off" placeholder="例如：家庭音乐库"/></label>
     <label>{{kind==='webdav'?'WebDAV 地址':'SMB UNC 路径'}}<input v-model="root" autocomplete="off" :placeholder="rootPlaceholder"/></label>

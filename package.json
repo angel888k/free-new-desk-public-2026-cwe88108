@@ -1,6 +1,6 @@
 {
-  "name": "free-new-desk",
-  "version": "1.4.17",
+  "name": "free-new-desk-public",
+  "version": "1.5.0",
   "private": false,
   "description": "Windows 11 x64 desktop media platform with TVBox/FongMi-compatible source architecture.",
   "type": "module",
@@ -8,7 +8,7 @@
   "author": "Free New Desk contributors",
   "license": "SEE LICENSE IN LICENSE",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24.18.1"
   },
   "workspaces": [
     "apps/*",
@@ -20,39 +20,54 @@
     "build:packages": "npm run build -w @free-new-desk/contracts && npm run build -w @free-new-desk/source-sdk && npm run build -w @free-new-desk/plugin-sdk && npm run build -w @free-new-desk/source-adapters && npm run build -w @free-new-desk/catvod-runtime-shim && npm run build -w @free-new-desk/tvbox-config && npm run build -w @free-new-desk/live-parser && npm run build -w @free-new-desk/epg-parser && npm run build -w @free-new-desk/data-service && npm run build -w @free-new-desk/proxy-service && npm run build -w @free-new-desk/spider-worker && npm run build -w @free-new-desk/plugin-host && npm run build -w @free-new-desk/jvm-spider-host && npm run build -w @free-new-desk/drpy2-worker && npm run build -w @free-new-desk/source-engine",
     "build:desktop": "npm run build -w @free-new-desk/desktop",
     "typecheck": "npm run build:packages && npm run typecheck --workspaces --if-present",
+    "typecheck:built": "npm run typecheck --workspaces --if-present",
     "lint": "node scripts/lint.mjs",
-    "check:public-sanitization": "node scripts/check-public-sanitization.mjs",
     "test": "npm run build:packages && npm run build:desktop && node --test tests/unit/*.test.mjs tests/integration/*.test.mjs",
-    "verify": "npm run lint && npm run typecheck && npm test && npm run build && node scripts/verify-renderer-build.mjs",
+    "test:built": "node --test tests/unit/*.test.mjs tests/integration/*.test.mjs",
+    "verify": "npm run check:public-sanitization && npm run lint && npm run build && npm run typecheck:built && npm run test:built && node scripts/verify-renderer-build.mjs",
     "dev": "npm run dev -w @free-new-desk/desktop",
     "player:configure": "cmake -S native/player-host -B native/player-host/build -A x64",
     "player:build": "cmake --build native/player-host/build --config Release",
     "prepare:icons": "node scripts/materialize-app-icons.mjs",
     "prepare:mpv": "node scripts/ensure-mpv-runtime.mjs",
     "prepare:runtime": "node scripts/prepare-runtime-workspaces.mjs",
-    "package:win": "npm run prepare:icons && npm run prepare:mpv && npm run build && npm run prepare:runtime && electron-builder --win nsis portable --x64 --publish never",
-    "smoke:packaged": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-packaged-app.ps1"
+    "prepare:builder-tools": "node scripts/prepare-builder-tools.mjs",
+    "package:prepare": "npm run prepare:icons && npm run prepare:mpv && npm run player:configure && npm run player:build && npm run build && npm run prepare:runtime",
+    "package:win": "npm run package:prepare && node scripts/package-windows.mjs",
+    "package:win:signed": "npm run package:prepare && node scripts/package-windows.mjs --signed",
+    "release:manifest": "node scripts/release-manifest.mjs",
+    "release:manifest:signed": "node scripts/release-manifest.mjs --signed",
+    "smoke:packaged": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-packaged-app.ps1",
+    "check:public-sanitization": "node scripts/check-public-sanitization.mjs"
   },
   "dependencies": {
-    "music-metadata": "11.15.0",
+    "music-metadata": "11.16.1",
     "pinia": "3.0.3",
-    "vue": "3.5.20",
+    "vue": "3.5.43",
     "vue-router": "4.5.1",
     "zod": "3.25.76"
   },
   "devDependencies": {
     "@types/node": "24.3.0",
-    "@vitejs/plugin-vue": "6.0.1",
-    "electron": "44.0.0",
-    "electron-builder": "26.0.12",
+    "@vitejs/plugin-vue": "6.0.9",
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3",
     "typescript": "5.9.2",
-    "vite": "7.1.3",
+    "vite": "7.3.7",
     "vue-tsc": "3.0.6"
+  },
+  "overrides": {
+    "@electron/get": {
+      "global-agent": "4.1.3"
+    }
   },
   "build": {
     "appId": "org.free-new-desk.desktop",
     "productName": "Free New Desk",
     "asar": true,
+    "toolsets": {
+      "nsis": "1.2.1"
+    },
     "directories": {
       "output": "dist/releases"
     },
@@ -80,6 +95,13 @@
         ]
       },
       "package.json",
+      {
+        "from": "dist",
+        "to": ".",
+        "filter": [
+          "build-provenance.json"
+        ]
+      },
       "THIRD_PARTY_NOTICES.md"
     ],
     "extraResources": [
@@ -145,6 +167,16 @@
     },
     "portable": {
       "artifactName": "Free-New-Desk-Portable-${version}-${arch}.${ext}"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "cwe88108",
+      "repo": "free-new-desk-public",
+      "releaseType": "release"
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cwe88108/free-new-desk-public.git"
   }
 }

@@ -2,6 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { SpiderAdapter } from '../../services/source-engine/dist/spider-adapter.js';
+import {mkdtemp,rm} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {prepareExecutableReview,writeExecutableApproval} from '../../services/source-engine/dist/executable-trust.js';
 
 const spiderCode=`
 module.exports={
@@ -21,10 +25,11 @@ async function withServer(run){
   try{return await run(`http://127.0.0.1:${address.port}/spider.js`);}finally{await new Promise((resolve,reject)=>server.close(error=>error?reject(error):resolve()));}
 }
 
-test('JS SpiderAdapter supports canonical FongMi methods through isolated worker',async()=>{
+test('approved JS SpiderAdapter supports canonical FongMi methods through a worker',async()=>{
   await withServer(async endpoint=>{
-    const adapter=new SpiderAdapter({id:'js-fixture',name:'JS Fixture',kind:'T3_JS',endpoint,enabled:true,trust:'B'});
-    await adapter.init({sourceId:'js-fixture'});
+    const config={id:'js-fixture',name:'JS Fixture',kind:'T3_JS',endpoint,enabled:true,trust:'B'},store=await mkdtemp(path.join(os.tmpdir(),'fnd-approved-js-'));
+    await writeExecutableApproval(store,await prepareExecutableReview(config));const adapter=new SpiderAdapter(config);
+    await adapter.init({sourceId:'js-fixture',executableTrustStoreDir:store});
     try{
       const home=await adapter.getHome();
       assert.deepEqual(home.categories,[{id:'movie',name:'电影'}]);
@@ -37,6 +42,6 @@ test('JS SpiderAdapter supports canonical FongMi methods through isolated worker
       assert.equal(detail.episodes[0]?.name,'EP1');
       assert.deepEqual(await adapter.search('keyword',2),{page:2,items:[{id:'s1',name:'keyword'}]});
       assert.deepEqual(await adapter.getPlay('Main','https://media.invalid/1.m3u8'),{url:'https://media.invalid/1.m3u8',parse:false,headers:{Referer:'https://example.invalid/'}});
-    }finally{await adapter.destroy();}
+    }finally{await adapter.destroy();await rm(store,{recursive:true,force:true});}
   });
 });

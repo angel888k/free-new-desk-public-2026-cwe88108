@@ -6,7 +6,7 @@ import {createRuntimeShim} from '@free-new-desk/catvod-runtime-shim';
 type JsonRecord=Record<string,unknown>;
 type SpiderExports=Record<string,(...args:unknown[])=>unknown|Promise<unknown>>;
 interface BrokerPending{resolve:(value:string)=>void;reject:(error:Error)=>void;timer:NodeJS.Timeout;callId:string;}
-let spider:SpiderExports={},sourceId='',proxyBaseUrl='',proxyToken='';
+let spider:SpiderExports={},sourceId='',proxyBaseUrl='';
 const storage=new Map<string,string>(),brokerPending=new Map<string,BrokerPending>();
 const callStore=new AsyncLocalStorage<string>(),cancelledCalls=new Set<string>();
 const send=(message:unknown)=>{if(process.send)process.send(message);};
@@ -51,7 +51,7 @@ async function call(method:string,args:unknown[],requestId:string):Promise<unkno
     const result=await Promise.race([Promise.resolve(fn(...args)),new Promise((_,reject)=>setTimeout(()=>reject(new Error(`Spider method timeout: ${method}`)),30_000))]);
     if(cancelledCalls.has(requestId))throw new DOMException('Aborted','AbortError');return result;
   });}finally{cancelledCalls.delete(requestId);}
-}process.on('message',(message:unknown)=>{void(async()=>{
+}const handleMessage=(message:unknown)=>{void(async()=>{
   if(!message||typeof message!=='object')return;const data=message as JsonRecord;
   if(data.type==='cancel'){cancelCall(String(data.id??''));return;}
   if(data.type==='broker.response'){
@@ -62,18 +62,15 @@ async function call(method:string,args:unknown[],requestId:string):Promise<unkno
   const id=String(data.id??'');
   try{
     if(data.type==='init'){
-      sourceId=String(data.sourceId??'');proxyBaseUrl=String(data.proxyBaseUrl??'');proxyToken=String(data.proxyToken??'');storage.clear();
+      sourceId=String(data.sourceId??'');proxyBaseUrl=String(data.proxyBaseUrl??'');storage.clear();
       spider=makeContext(String(data.code??''));if(typeof spider.init==='function')await call('init',[{sourceId}],id);
       send({type:'response',id,result:{ok:true}});return;
     }
     if(data.type==='call'){
       const result=await call(String(data.method??''),Array.isArray(data.args)?data.args:[],id);
-      if(result&&typeof result==='object'&&proxyBaseUrl&&typeof(result as JsonRecord).url==='string'&&String((result as JsonRecord).url).startsWith(proxyBaseUrl)){
-        const value=result as JsonRecord;value.headers={...((value.headers&&typeof value.headers==='object')?value.headers as JsonRecord:{}),Authorization:`Bearer ${proxyToken}`};
-      }
       send({type:'response',id,result});return;
     }
     throw new Error('Unsupported worker message');
   }catch(error){send({type:'response',id,error:error instanceof Error?error.message:String(error)});}
-})();});
-process.on('disconnect',()=>process.exit(0));
+})();};
+process.on('message',handleMessage);process.on('disconnect',()=>process.exit(0));

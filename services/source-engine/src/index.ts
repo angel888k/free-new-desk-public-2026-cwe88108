@@ -9,6 +9,7 @@ import {classifyRuntimeFlavor,runtimeHint} from './runtime-classifier.js';
 import {DoubanAdapter} from './douban-adapter.js';
 import {legacyPlayResultToDescriptorV2} from './playback-descriptor.js';
 import {RuntimeManager,runtimeKey} from './runtime-manager.js';
+import {prepareExecutableReview} from './executable-trust.js';
 
 const MAX_EXECUTABLE=6,IDLE_MS=180_000;
 const runtimeProbeBroker=new RequestBroker();
@@ -26,8 +27,10 @@ async function useDrpy2(config:SourceConfig,signal?:AbortSignal):Promise<boolean
 export class SourceEngine{
   readonly #configs=new Map<string,SourceConfig>();readonly #failures=new Map<string,string>();readonly #notices=new Map<string,string>();readonly #auditPending=new Map<string,Promise<SourceAuditResult>>();
   readonly #runtime=new RuntimeManager({maxExecutable:MAX_EXECUTABLE,idleMs:IDLE_MS,isExecutable:executable,create:config=>this.#initializeAdapter(config)});
-  #proxyBaseUrl='';#proxyToken='';#engineStoreDir='';
-  configureRuntime(config:{proxyBaseUrl?:string;proxyToken?:string;engineStoreDir?:string}):void{this.#proxyBaseUrl=config.proxyBaseUrl??'';this.#proxyToken=config.proxyToken??'';this.#engineStoreDir=config.engineStoreDir??'';}
+  #proxyBaseUrl='';#proxyToken='';#engineStoreDir='';#executableTrustStoreDir='';
+  configureRuntime(config:{proxyBaseUrl?:string;proxyToken?:string;engineStoreDir?:string;executableTrustStoreDir?:string}):void{this.#proxyBaseUrl=config.proxyBaseUrl??'';this.#proxyToken=config.proxyToken??'';this.#engineStoreDir=config.engineStoreDir??'';this.#executableTrustStoreDir=config.executableTrustStoreDir??'';}
+  prepareExecutable(config:SourceConfig){return prepareExecutableReview(config);}
+  async resetExecutable(sourceId:string):Promise<void>{await this.#runtime.resetSource(sourceId);this.#failures.delete(sourceId);}
   async replaceSources(sources:SourceConfig[]):Promise<void>{
     const next=sources.filter(source=>source.enabled),previous=new Map(this.#configs);this.#configs.clear();
     for(const config of next){this.#configs.set(config.id,config);const old=previous.get(config.id);if(!old||runtimeKey(old)!==runtimeKey(config)){this.#failures.delete(config.id);this.#notices.delete(config.id);}}
@@ -43,7 +46,7 @@ export class SourceEngine{
   }}
   async #initializeAdapter(config:SourceConfig):Promise<SourceAdapter>{
     const adapter=await this.#createAdapter(config);if(!adapter)throw new Error(`Unsupported source kind: ${config.kind}`);
-    const context:SourceContext={sourceId:config.id,configRevision:config.configRevision??'legacy',accountProfile:'default',...(this.#proxyBaseUrl?{proxyBaseUrl:this.#proxyBaseUrl}:{}),...(this.#proxyToken?{proxyToken:this.#proxyToken}:{}),...(this.#engineStoreDir?{engineStoreDir:this.#engineStoreDir}:{}),...(config.headers?{requestHeaders:config.headers}:{})};
+    const context:SourceContext={sourceId:config.id,configRevision:config.configRevision??'legacy',accountProfile:'default',executableTrustStoreDir:this.#executableTrustStoreDir,...(this.#proxyBaseUrl?{proxyBaseUrl:this.#proxyBaseUrl}:{}),...(this.#proxyToken?{proxyToken:this.#proxyToken}:{}),...(this.#engineStoreDir?{engineStoreDir:this.#engineStoreDir}:{}),...(config.headers?{requestHeaders:config.headers}:{})};
     try{await adapter.init(context);this.#failures.delete(config.id);this.#notices.delete(config.id);return adapter;}
     catch(error){
       const message=error instanceof Error?error.message:String(error);

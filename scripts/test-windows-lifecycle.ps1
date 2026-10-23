@@ -1,7 +1,9 @@
+[CmdletBinding()]
+param([string]$AppPath = '', [string]$ReleaseDir = '')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $root 'dist/releases/win-unpacked/Free New Desk.exe'
-if (-not (Test-Path $exe)) { throw "Packaged executable not found: $exe" }
+$exe = if ($AppPath) { [IO.Path]::GetFullPath($AppPath) } elseif ($ReleaseDir) { Join-Path $ReleaseDir 'win-unpacked/Free New Desk.exe' } else { Join-Path $root 'dist/releases/win-unpacked/Free New Desk.exe' }
+if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Packaged executable not found: $exe" }
 
 Add-Type @"
 using System;
@@ -38,7 +40,7 @@ $second = $null
 $recovered = $null
 try {
   Write-Host 'Starting packaged application with a fresh profile.'
-  $primary = Start-Process -FilePath $exe -ArgumentList @("--user-data-dir=$profile") -PassThru
+  $primary = Start-Process -FilePath $exe -ArgumentList @('--user-data-dir="' + $profile + '"') -PassThru
   Wait-AppWindow $primary
 
   $database = Join-Path $profile 'data/app.db'
@@ -56,7 +58,7 @@ try {
   if ([NativeLifecycleSmoke]::IsWindowVisible($handle)) { throw 'Main window remained visible after close-to-tray.' }
 
   Write-Host 'Starting a second instance to verify single-instance activation.'
-  $second = Start-Process -FilePath $exe -ArgumentList @("--user-data-dir=$profile") -PassThru
+  $second = Start-Process -FilePath $exe -ArgumentList @('--user-data-dir="' + $profile + '"') -PassThru
   if (-not $second.WaitForExit(15000)) { throw 'Second instance did not exit after handing activation to the primary instance.' }
   if ($second.ExitCode -ne 0) { throw "Second instance exited with code $($second.ExitCode)." }
 
@@ -72,11 +74,11 @@ try {
   Stop-ProcessTree $primary
   $primary = $null
 
-  $recovered = Start-Process -FilePath $exe -ArgumentList @("--user-data-dir=$profile") -PassThru
+  $recovered = Start-Process -FilePath $exe -ArgumentList @('--user-data-dir="' + $profile + '"') -PassThru
   Wait-AppWindow $recovered
   Start-Sleep -Seconds 2
   if (-not (Test-Path $database)) { throw 'Existing SQLite configuration was lost during recovery startup.' }
-  $logText = Get-Content $log -Raw
+  $logText = Get-Content -LiteralPath $log -Raw
   if ($logText -notmatch 'detected previous unclean shutdown') { throw 'Recovery startup did not record the previous unclean shutdown.' }
   $lastReady = $logText.LastIndexOf('"message":"application ready"')
   if ($lastReady -lt 0) { throw 'Recovery startup did not record a new application-ready event.' }

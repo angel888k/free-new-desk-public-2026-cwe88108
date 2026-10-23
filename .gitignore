@@ -14,8 +14,17 @@ coverage/
 !.env.example
 native/player-host/build/
 third_party/mpv/win-x64/*.dll
+third_party/mpv/cache/
+third_party/build-tools/cache/
 assets/app-icon.ico
+
+_logs/
+NVIDIA Corporation/
 diagnostics/
 *.dmp
 *.sqlite
 *.db
+*.db-*
+*.pem
+*.pfx
+*.p12

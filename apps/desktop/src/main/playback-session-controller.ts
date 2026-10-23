@@ -13,13 +13,14 @@ export class PlaybackSessionController{
   readonly #emit:(snapshot:PlaybackSessionSnapshot)=>void;
   constructor(emit:(snapshot:PlaybackSessionSnapshot)=>void){this.#emit=emit;}
   current():PlaybackSessionSnapshot{return{...this.#snapshot};}
-  begin(domain:PlaybackDomain,meta:Partial<PlaybackSessionSnapshot>={},initiator:PlaybackInitiator='user'):PlaybackSessionSnapshot{
+  begin(domain:PlaybackDomain,meta:Partial<PlaybackSessionSnapshot>={},initiator:PlaybackInitiator='user',parent?:PlaybackSessionSnapshot):PlaybackSessionSnapshot{
+    if(parent&&(parent.requestId!==this.#snapshot.requestId||parent.generation!==this.#generation||parent.loadId!==this.#snapshot.loadId||(parent.controlRevision??0)!==(this.#snapshot.controlRevision??0)||['stopped','failed','superseded'].includes(this.#snapshot.status)))throw new PlaybackSupersededError();
     const now=Date.now();
     if(this.#snapshot.domain&&mutableStatus(this.#snapshot.status)){
       this.#snapshot={...this.#snapshot,status:'superseded',endReason:'replaced',updatedAt:now};this.#publish();
     }
     const generation=++this.#generation,sessionId=randomUUID(),requestId=randomUUID();
-    this.#snapshot={...meta,generation,sessionId,requestId,domain,status:'requested',initiator,updatedAt:now};
+    this.#snapshot={...meta,generation,sessionId,requestId,domain,status:'requested',initiator,desiredPaused:false,controlRevision:0,updatedAt:now};
     this.#publish();return this.current();
   }
   assertCurrent(requestId:string):void{if(!requestId||this.#snapshot.requestId!==requestId)throw new PlaybackSupersededError();}
@@ -30,11 +31,12 @@ export class PlaybackSessionController{
     this.assertMutable(requestId);this.#snapshot={...this.#snapshot,...patch,requestId,generation:this.#generation,updatedAt:Date.now()};this.#publish();return this.current();
   }
   loading(requestId:string,loadId?:string):PlaybackSessionSnapshot{return this.patch(requestId,{status:'loading',...(loadId?{loadId}:{})});}
-  playing(requestId:string,loadId?:string):PlaybackSessionSnapshot{return this.patch(requestId,{status:'playing',startedAt:this.#snapshot.startedAt??Date.now(),...(loadId?{loadId}:{})});}
-  pause(requestId:string,paused:boolean):PlaybackSessionSnapshot|undefined{if(!this.isMutable(requestId))return;return this.patch(requestId,{status:paused?'paused':'playing'});}
+  playing(requestId:string,loadId?:string):PlaybackSessionSnapshot{return this.patch(requestId,{status:this.#snapshot.desiredPaused?'paused':'playing',startedAt:this.#snapshot.startedAt??Date.now(),...(loadId?{loadId}:{})});}
+  requestPause(requestId:string,paused:boolean):PlaybackSessionSnapshot{this.assertMutable(requestId);return this.patch(requestId,{desiredPaused:paused,controlRevision:(this.#snapshot.controlRevision??0)+1});}
+  pause(requestId:string,paused:boolean):PlaybackSessionSnapshot|undefined{if(!this.isMutable(requestId))return;return this.patch(requestId,{desiredPaused:paused,...(this.#snapshot.status==='requested'||this.#snapshot.status==='loading'?{}:{status:paused?'paused':'playing'})});}
   fail(requestId:string,error:string):PlaybackSessionSnapshot|undefined{if(!this.isMutable(requestId))return;return this.patch(requestId,{status:'failed',endReason:'failed',error});}
   end(reason:'eof'|'stop'|'replaced'|'failed'|'unknown'='unknown'):PlaybackSessionSnapshot{
-    if(!this.#snapshot.domain||!mutableStatus(this.#snapshot.status))return this.current();
+    if(!this.#snapshot.domain||(!mutableStatus(this.#snapshot.status)&&!(reason==='stop'&&this.#snapshot.status==='ended')))return this.current();
     this.#snapshot={...this.#snapshot,status:reason==='eof'?'ended':reason==='failed'?'failed':reason==='replaced'?'superseded':'stopped',endReason:reason,updatedAt:Date.now()};this.#publish();return this.current();
   }
   supersede():PlaybackSessionSnapshot{

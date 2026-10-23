@@ -6,6 +6,7 @@ import net from 'node:net';
 import path from 'node:path';
 import type { PlaybackDomain,PlaybackInitiator,PlaybackSessionSnapshot,PlayerCommand,PlayerLoadStatus,PlayerQuery,PlayerStats,PlayerTrack,PlayRequest } from '@free-new-desk/contracts';
 import { PlaybackSessionController,PlaybackSupersededError as SessionSupersededError } from './playback-session-controller.js';
+import {resolveLivePlaybackTarget} from './live-playback-target.js';
 
 type PlayerParams=Record<string,unknown>;
 type CommandResult={ok:boolean;detail?:string};
@@ -34,7 +35,7 @@ const runtimeController=new PlaybackSessionController(snapshot=>{for(const liste
 export function getCurrentPlayerClient():PlayerClient|undefined{return currentPlayerClient;}
 export function getPlayerRuntimeSession():PlayerRuntimeSession{return runtimeController.current();}
 export function onPlayerRuntimeSession(listener:(session:PlayerRuntimeSession)=>void):()=>void{runtimeListeners.add(listener);listener(runtimeController.current());return()=>runtimeListeners.delete(listener);}
-export function beginPlayerRuntimeSession(domain:PlaybackDomain,meta:Partial<PlaybackSessionSnapshot>={},initiator:PlaybackInitiator='user'):PlayerRuntimeSession{return runtimeController.begin(domain,meta,initiator);}
+export function beginPlayerRuntimeSession(domain:PlaybackDomain,meta:Partial<PlaybackSessionSnapshot>={},initiator:PlaybackInitiator='user',parent?:PlaybackSessionSnapshot):PlayerRuntimeSession{return runtimeController.begin(domain,meta,initiator,parent);}
 export function patchPlayerRuntimeSession(requestId:string,patch:Partial<PlaybackSessionSnapshot>):PlayerRuntimeSession|undefined{if(!runtimeController.isMutable(requestId))return;return runtimeController.patch(requestId,patch);}
 export function failPlayerRuntimeSession(requestId:string,error:string):PlayerRuntimeSession|undefined{return runtimeController.fail(requestId,error);}
 export function endPlayerRuntimeSession(requestId:string,reason:'eof'|'stop'|'replaced'|'failed'|'unknown'='unknown'):PlayerRuntimeSession|undefined{if(!runtimeController.isCurrent(requestId))return;return runtimeController.end(reason);}
@@ -47,20 +48,23 @@ export class PlayerClient{
   #parentHwnd='';
   #startPromise:Promise<void>|undefined;
   #loadGeneration=0;
+  #liveTargetController:AbortController|undefined;
   #acceptedEpoch='';
   #sampleSeq=0;
   #seekRevision=0;
+  #pauseRevision=0;
   #lastStatsAt=0;
   #statsState:'pending'|'fresh'|'stale'|'unavailable'='pending';
   #transportFaultEpoch='';
   #transportFaultStreak=0;
+  #lastTransportFaultAt=0;
   #statsInFlight:{requestId:string;loadId?:string;promise:Promise<PlayerStats>}|undefined;
   #lastStats:PlayerStats|undefined;
 
   constructor(private readonly recordMetric:(metric:string,value:number)=>void=()=>{}){currentPlayerClient=this;}
 
   #resetStatsCache():void{this.#statsInFlight=undefined;this.#lastStats=undefined;this.#lastStatsAt=0;this.#statsState='pending';}
-  #resetTransportFaults():void{this.#transportFaultEpoch='';this.#transportFaultStreak=0;}
+  #resetTransportFaults():void{this.#transportFaultEpoch='';this.#transportFaultStreak=0;this.#lastTransportFaultAt=0;}
 
   setParentWindowHandle(handle:Buffer):void{
     try{
@@ -70,19 +74,22 @@ export class PlayerClient{
       if(!next||next==='0'||next===this.#parentHwnd)return;
       const hadParent=Boolean(this.#parentHwnd);
       this.#parentHwnd=next;
-      if(hadParent&&this.#process&&!this.#process.killed)this.stop();
+      if(hadParent&&this.#process&&!this.#process.killed){this.#loadGeneration+=1;this.#resetStatsCache();this.#resetTransportFaults();this.#stopTransportOnly();}
     }catch{/* Invalid native window handle; parent PID remains as fallback. */}
   }
 
   async load(request:PlayRequest,onAccepted?:(loadId:string)=>void,context:PlayerLoadContext={}):Promise<CommandResult>{
     if(process.platform!=='win32')return{ok:false,detail:'Native PlayerHost is Windows-only'};
-    const generation=++this.#loadGeneration;
     const domain:PlaybackDomain|null=request.profile==='vod'||request.profile==='live'||request.profile==='music'?request.profile:null;
     let requestId='';
     if(domain){
       if(context.requestId){assertPlayerRuntimeCurrent(context.requestId,domain);requestId=context.requestId;patchPlayerRuntimeSession(requestId,runtimeMeta(context));}
       else requestId=runtimeController.begin(domain,runtimeMeta(context),context.initiator??'user').requestId;
     }
+    const generation=++this.#loadGeneration;
+    this.#liveTargetController?.abort();
+    const targetController=new AbortController();
+    this.#liveTargetController=targetController;
     const requestedAt=performance.now();
     const originalHeaders={...(request.headers??{})};
     const explicitUserAgent=Boolean(request.headerFields)||hasHeader(originalHeaders,'User-Agent');
@@ -95,16 +102,21 @@ export class PlayerClient{
     for(let index=0;index<attempts.length;index+=1){
       try{
         this.#assertCurrent(generation,requestId,domain??undefined);
-        const fields=request.headerFields??headerFields(attempts[index]??{});
+        const target=request.profile==='live'&&!request.headerFields
+          ?await resolveLivePlaybackTarget(request.url,attempts[index]??{},targetController.signal)
+          :{url:request.url,headers:attempts[index]??{}};
+        this.#assertCurrent(generation,requestId,domain??undefined);
+        const fields=request.headerFields??headerFields(target.headers);
         const started=Date.now();
         try{
           const dispatchStarted=performance.now();
           this.recordMetric('playbackRequestQueueMs',dispatchStarted-requestedAt);
-          const accepted=await this.#sendWithRecovery('player.load',{url:request.url,...(fields?{headerFields:fields}:{}),...(request.profile?{profile:request.profile}:{}),generation},generation,requestId,domain??undefined) as LoadAccepted;
+          const intent=runtimeController.current();
+          const accepted=await this.#sendWithRecovery('player.load',{url:target.url,...(fields?{headerFields:fields}:{}),...(request.profile?{profile:request.profile}:{}),generation,sessionGeneration:intent.generation,paused:intent.desiredPaused??false,pauseRevision:intent.controlRevision??0},generation,requestId,domain??undefined) as LoadAccepted;
           this.recordMetric('playbackRequestDispatchMs',performance.now()-dispatchStarted);
           this.#assertCurrent(generation,requestId,domain??undefined);
           if(!accepted.ok||!accepted.accepted||!accepted.loadId)throw new PlayerRemoteError(accepted.detail??'PlayerHost did not accept media load');
-          if(requestId&&runtimeController.isCurrent(requestId))runtimeController.patch(requestId,{...runtimeMeta(context),status:'loading',loadId:accepted.loadId});
+          if(requestId&&runtimeController.isCurrent(requestId))runtimeController.patch(requestId,{...runtimeMeta(context),status:'loading',loadId:accepted.loadId,hostEpoch:accepted.hostEpoch??''});
           this.#acceptedEpoch=accepted.hostEpoch??'';this.#sampleSeq=0;this.#seekRevision=0;this.#resetStatsCache();this.#resetTransportFaults();
           onAccepted?.(accepted.loadId);
           const openStarted=performance.now();
@@ -119,6 +131,7 @@ export class PlayerClient{
           if(!quickRemoteFailure||index===attempts.length-1)throw error;
         }
       }catch(error){
+        if(generation!==this.#loadGeneration)error=new PlaybackSupersededError();
         if(error instanceof PlaybackSupersededError||error instanceof SessionSupersededError){this.recordMetric('cancelledPlaybackRequestCount',1);return{ok:false,detail:error.message};}
         if(requestId)runtimeController.fail(requestId,error instanceof Error?error.message:String(error));
         throw error;
@@ -130,15 +143,18 @@ export class PlayerClient{
 
   async command(command:PlayerCommand):Promise<CommandResult>{
     if(process.platform!=='win32')return{ok:false,detail:'Native PlayerHost is Windows-only'};
-    if(command.command==='stop'){this.#loadGeneration+=1;this.#resetStatsCache();this.#resetTransportFaults();const current=runtimeController.current();if(current.requestId)runtimeController.end('stop');}
     const before=runtimeController.current();
-    if(command.command==='seek'&&((command.loadId&&command.loadId!==before.loadId)||(command.requestId&&command.requestId!==before.requestId)))return{ok:false,detail:'[PLAYBACK_SUPERSEDED] seek 会话已变化'};
-    const payload=command.command==='seek'?{...command,loadId:before.loadId}:command;
-    const result=await this.#sendWithRecovery('player.command',payload as unknown as PlayerParams) as CommandResult&{seekRevision?:number};
+    if((command.loadId&&command.loadId!==before.loadId)||(command.requestId&&command.requestId!==before.requestId))return{ok:false,detail:'[PLAYBACK_SUPERSEDED] 控制命令的播放会话已变化'};
+    if(command.command==='pause'&&before.requestId)runtimeController.requestPause(before.requestId,command.value);
+    if(command.command==='stop'){this.#liveTargetController?.abort();this.#loadGeneration+=1;this.#resetStatsCache();this.#resetTransportFaults();if(before.requestId)runtimeController.end('stop');}
+    const pauseRevision=command.command==='pause'?++this.#pauseRevision:this.#pauseRevision;
+    const payload={...command,sessionGeneration:before.generation,...(before.loadId?{loadId:before.loadId}:{}),...(command.command==='pause'?{pauseRevision:runtimeController.current().controlRevision??0}:{})};
+    const expectedId=runtimeController.isMutable(before.requestId)||command.command==='stop'?before.requestId:'';
+    const result=await this.#sendWithRecovery('player.command',payload as unknown as PlayerParams,this.#loadGeneration,expectedId,before.domain??undefined,command.command==='stop') as CommandResult&{seekRevision?:number};
     if(command.command==='seek'&&before.loadId===runtimeController.current().loadId&&result.ok)this.#seekRevision=result.seekRevision??this.#seekRevision;
     else if(command.command==='seek'&&!result.ok)this.recordMetric('seekRejectedCount',1);
 
-    if(result.ok&&command.command==='pause'){const current=runtimeController.current();if(current.requestId)runtimeController.pause(current.requestId,command.value);}
+    if(result.ok&&command.command==='pause'){const current=runtimeController.current();if(before.requestId&&current.requestId===before.requestId&&current.generation===before.generation&&pauseRevision===this.#pauseRevision)runtimeController.pause(before.requestId,command.value);}
     return result;
   }
 
@@ -181,7 +197,15 @@ export class PlayerClient{
         result=this.#lastStats;
       }else{
         const cached=this.#lastStats,age=Math.max(0,performance.now()-this.#lastStatsAt);
-        if(!cached||cached.hostEpoch!==this.#acceptedEpoch||cached.loadId!==current.loadId||(cached.seekRevision??0)<this.#seekRevision){this.#statsState='pending';throw new Error('[PLAYBACK_STATS_PENDING] 等待当前会话有效采样');}
+        if(!cached||cached.hostEpoch!==this.#acceptedEpoch||cached.loadId!==current.loadId||(cached.seekRevision??0)<this.#seekRevision){
+          this.#statsState='pending';
+          const pendingDisplay=sample as PlayerStats;
+          if(Number.isFinite(pendingDisplay.duration)&&pendingDisplay.duration>0&&Number.isFinite(pendingDisplay.position)&&pendingDisplay.position>=0){
+            this.recordMetric('playerStatsPendingDisplayCount',1);
+            return {...pendingDisplay,sampleFresh:false,sampleAgeMs:0,sampleState:'pending' as const,domain:current.domain,requestId:current.requestId,sessionGeneration:current.generation,sessionStatus:current.status,...(current.loadId?{sessionLoadId:current.loadId}:{})} as PlayerStats;
+          }
+          throw new Error('[PLAYBACK_STATS_PENDING] 等待当前会话有效采样');
+        }
         if(age>STATS_HARD_EXPIRY_MS){if(this.#statsState!=='unavailable')this.recordMetric('playerStatsUnavailableCount',1);this.#statsState='unavailable';throw new Error('[PLAYBACK_STATS_UNAVAILABLE] 当前会话统计已超过 15 秒，不能用于播放或恢复决策');}
         if(age>STATS_SOFT_STALE_MS&&this.#statsState!=='stale')this.recordMetric('playerStatsStaleCount',1);
         this.#statsState='stale';
@@ -208,9 +232,10 @@ export class PlayerClient{
     throw new PlayerRemoteError('Timed out waiting for mpv to open media');
   }
 
-  #assertCurrent(generation:number,requestId='',domain?:PlaybackDomain):void{if(generation!==this.#loadGeneration){this.recordMetric('stalePlaybackResponseCount',1);throw new PlaybackSupersededError();}if(requestId&&(!runtimeController.isMutable(requestId)||!isPlayerRuntimeCurrent(requestId,domain))){this.recordMetric('stalePlaybackResponseCount',1);throw new PlaybackSupersededError();}}
+  #assertCurrent(generation:number,requestId='',domain?:PlaybackDomain,allowTerminal=false):void{if(generation!==this.#loadGeneration){this.recordMetric('stalePlaybackResponseCount',1);throw new PlaybackSupersededError();}if(requestId&&((!allowTerminal&&!runtimeController.isMutable(requestId))||!isPlayerRuntimeCurrent(requestId,domain))){this.recordMetric('stalePlaybackResponseCount',1);throw new PlaybackSupersededError();}}
 
   stop():void{
+    this.#liveTargetController?.abort();
     this.#loadGeneration+=1;
     this.#resetStatsCache();
     this.#resetTransportFaults();
@@ -220,10 +245,10 @@ export class PlayerClient{
     this.#pipeName='';
   }
 
-  async #sendWithRecovery(method:string,params:PlayerParams,generation?:number,requestId='',domain?:PlaybackDomain):Promise<unknown>{
+  async #sendWithRecovery(method:string,params:PlayerParams,generation?:number,requestId='',domain?:PlaybackDomain,allowTerminal=false):Promise<unknown>{
     const expectedGeneration=generation??this.#loadGeneration;
     const session=runtimeController.current();
-    const assertCurrent=()=>this.#assertCurrent(expectedGeneration,requestId,domain);
+    const assertCurrent=()=>this.#assertCurrent(expectedGeneration,requestId,domain,allowTerminal);
     try{
       assertCurrent();
       // A query/control must not silently recreate an empty host for an active media session.
@@ -240,8 +265,10 @@ export class PlayerClient{
       if(method!=='player.load'){
         if(first instanceof PlayerTransportTimeoutError||first instanceof PlayerTransportConnectionError){
           const faultEpoch=this.#acceptedEpoch||'host-starting';
-          if(this.#transportFaultEpoch!==faultEpoch){this.#transportFaultEpoch=faultEpoch;this.#transportFaultStreak=0;}
-          this.#transportFaultStreak+=1;
+          if(this.#transportFaultEpoch!==faultEpoch){this.#transportFaultEpoch=faultEpoch;this.#transportFaultStreak=0;this.#lastTransportFaultAt=0;}
+          // Multiple overlapping failed queries during one I/O stall count as one incident, not three host deaths.
+          const faultAt=performance.now();
+          if(this.#lastTransportFaultAt===0||faultAt-this.#lastTransportFaultAt>=1_000){this.#transportFaultStreak+=1;this.#lastTransportFaultAt=faultAt;}
           this.recordMetric(first instanceof PlayerTransportTimeoutError?'playerHostTimeoutCount':'playerHostConnectionFailureCount',1);
           // A timeout or pipe reset does not prove that the host died or that a non-idempotent command was not applied. Only a fresh, identity-checked stats sample clears this epoch-bound fault budget.
           if(this.#transportFaultStreak<3){const kind=method==='player.query'?'QUERY':'COMMAND';const code=first instanceof PlayerTransportTimeoutError?`[PLAYER_${kind}_TIMEOUT]`:`[PLAYER_${kind}_UNAVAILABLE]`;throw new Error(`${code} PlayerHost 本次通信未确认，媒体会话保持不变`,{cause:first});}

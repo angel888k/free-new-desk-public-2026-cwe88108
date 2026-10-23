@@ -111,6 +111,10 @@ export class RuntimeManager{
       if(now-entry.lastIdleAt>=this.options.idleMs)await this.#dispose(entry);
     }
   }
+  async resetSource(sourceId:string):Promise<void>{
+    const pending=[...this.#initializing.entries()].filter(([key])=>key.startsWith(`${sourceId}\u0000`)).map(([,work])=>work);await Promise.allSettled(pending);
+    for(const entry of [...this.#entries.values()])if(entry.config.id===sourceId){for(const[id,key]of this.#leases)if(key===entry.key)this.#leases.delete(id);await this.#dispose(entry);}
+  }
   snapshot():RuntimeSnapshot[]{
     return[...this.#entries.values()].map(entry=>({
       key:entry.key,sourceId:entry.config.id,revision:runtimeRevision(entry.config),

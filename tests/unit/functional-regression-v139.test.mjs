@@ -5,7 +5,7 @@ import test from 'node:test';
 const read=(path)=>readFile(new URL('../../'+path,import.meta.url),'utf8');
 
 test('application lifecycle has single-instance, tray, crash, power and health guards',async()=>{
-  const source=await read('apps/desktop/src/main/index.ts');
+  const source=await read('apps/desktop/src/main/bootstrap.ts')+await read('apps/desktop/src/main/index.ts');
   for(const token of ['requestSingleInstanceLock','second-instance','new Tray','uncaughtException','unhandledRejection','render-process-gone','powerMonitor.on(\'suspend\'','powerMonitor.on(\'resume\'','source engine heartbeat','lifecycle.cleanExit']){
     assert.ok(source.includes(token),`missing lifecycle guard: ${token}`);
   }
@@ -79,7 +79,7 @@ test('batch 2 closes VOD, live, search, favorites and accessibility gaps',async(
   assert.match(vod,/filter-drawer/);assert.match(vod,/closeTransient/);assert.match(vod,/vod-context-menu/);assert.match(vod,/新窗口打开/);
   assert.match(live,/setTimeout\(\(\)=>\{channelQuery\.value=channelInput\.value;.*\},200\)/s);assert.match(live,/virtualChannels/);assert.match(live,/创建节目预约/);assert.match(live,/自定义排序/);
   assert.match(search,/useRoute/);assert.match(search,/listVodFavorites/);assert.match(search,/visibleLiveMatches/);
-  assert.match(favorites,/saveFavorite/);assert.match(favorites,/removeFavorite/);assert.match(favorites,/来源不可用/);
+  assert.match(favorites,/window\.desktop\.vodFavorites\.import\(parsed\)/);assert.match(favorites,/removeFavorite/);assert.match(favorites,/来源不可用/);
   assert.match(settings,/reservationConflicts/);
   assert.match(styles,/forced-colors:active/);assert.match(styles,/:focus-visible/);
   assert.match(main,/30_000\);const abort/);assert.match(main,/app:newWindow/);assert.match(main,/live:saveFavorite/);
@@ -92,9 +92,9 @@ test('batch 3 closes audit, progress, update metadata and font-scale gaps withou
   const settings=await read('apps/desktop/src/renderer/views/SettingsView.vue');
   const main=await read('apps/desktop/src/main/index.ts');
   const styles=await read('apps/desktop/src/renderer/styles.css');
-  assert.match(home,/class="home-dashboard"/);
-  assert.match(home,/class="panel continue-watch"/);
-  assert.match(home,/class="panel decode-card"/);
+  assert.match(home,/class="home-portal"/);
+  assert.match(home,/class="resume-card"/);
+  assert.match(home,/diagnostics\.hardwareDecode/);
   assert.match(home,/window\.desktop\.playback\.play/);
   assert.match(home,/publishedAt/);
   assert.match(home,/checkingUpdate/);

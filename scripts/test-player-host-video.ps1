@@ -46,6 +46,6 @@ try{
   $final=Read-Stats
   Write-Host ("PlayerHost controlled-video validation passed: {0}x{1}, duration={2:N2}s, seek 10%->85%->20%, clock advanced {3:N2}s." -f $final.width,$final.height,$duration,($after-$before))
 } finally {
-  if($process -and -not $process.HasExited){Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue}
+  if($process -and -not $process.HasExited){Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue;[void]$process.WaitForExit(10000)}
   Remove-Item $video -Force -ErrorAction SilentlyContinue
 }

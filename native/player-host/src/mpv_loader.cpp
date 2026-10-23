@@ -5,13 +5,14 @@ struct mpv_event { int event_id; int error; std::uint64_t reply_userdata; void* 
 
 namespace {
 struct mpv_event_start_file_head { std::int64_t playlist_entry_id; };
-struct mpv_event_end_file_head { int reason; int error; std::int64_t playlist_entry_id; };
+struct mpv_event_end_file_head { int reason; int error; std::int64_t playlist_entry_id; std::int64_t playlist_insert_id; int playlist_insert_num_entries; };
 constexpr int MPV_EVENT_NONE=0;
 constexpr int MPV_EVENT_SHUTDOWN=1;
 constexpr int MPV_EVENT_COMMAND_REPLY=5;
 constexpr int MPV_EVENT_START_FILE=6;
 constexpr int MPV_EVENT_END_FILE=7;
 constexpr int MPV_EVENT_FILE_LOADED=8;
+constexpr int MPV_EVENT_VIDEO_RECONFIG=17;
 constexpr int MPV_END_FILE_REASON_EOF=0;
 constexpr int MPV_END_FILE_REASON_STOP=2;
 constexpr int MPV_END_FILE_REASON_QUIT=3;
@@ -135,10 +136,11 @@ bool MpvLoader::startLoad(const std::string& url,const std::string& headerFields
   std::vector<std::string> values={"loadfile",segment.url,"replace"};
   if(!segment.options.empty()){values.push_back("-1");values.push_back(segment.options);}
   if(!command(values,error)){loadStatus_="failed";loadError_=error;return false;}
-  std::string entry;
-  if(!getProperty("playlist/0/id",entry,error)){loadStatus_="failed";loadError_=error;return false;}
-  try{activeEntryId_=std::stoll(entry);}catch(...){error="Invalid mpv playlist entry ID";loadStatus_="failed";loadError_=error;return false;}
-
+  // The playlist entry for this load is confirmed by the upcoming MPV_EVENT_START_FILE event
+  // (see eventLoop). Never read playlist/0/id synchronously here: after a replace it may still
+  // hold the previous entry, and any mismatch with START_FILE would keep loadStarted_ false
+  // forever, making every sample permanently invalid.
+  eventEntryId_=-1;
   return true;
 }
 
@@ -168,14 +170,25 @@ void MpvLoader::eventLoop(){
     }
     if(event->event_id==MPV_EVENT_START_FILE){
       std::lock_guard<std::mutex> lock(loadMutex_);
-      eventEntryId_=event->data?static_cast<const mpv_event_start_file_head*>(event->data)->playlist_entry_id:-1;
-      if(eventEntryId_!=activeEntryId_)continue;
-      loadStarted_=true;
-      loadStatus_="loading";
-      loadError_.clear();
+      const std::int64_t entry=event->data?static_cast<const mpv_event_start_file_head*>(event->data)->playlist_entry_id:-1;
+      // Confirm the active entry from START_FILE itself; late events of a replaced entry must
+      // not overwrite the already confirmed one.
+      if(loadStatus_=="loading"&&(activeEntryId_<0||entry==activeEntryId_)){
+        activeEntryId_=entry;
+        eventEntryId_=entry;
+        loadStarted_=true;
+        loadError_.clear();
+      }
+      continue;
+    }
+    if(event->event_id==MPV_EVENT_VIDEO_RECONFIG){
+      if(surfaceChanged_)surfaceChanged_();
       continue;
     }
     if(event->event_id==MPV_EVENT_FILE_LOADED){
+      // Apply the current embedding intent after mpv may have resized or shown its window.
+      // No load mutex is held while the owner performs Win32 window operations.
+      if(surfaceChanged_)surfaceChanged_();
       std::lock_guard<std::mutex> lock(loadMutex_);
       if(loadStarted_&&eventEntryId_==activeEntryId_){loadStatus_="loaded";loadError_.clear();}
       continue;
@@ -198,6 +211,21 @@ void MpvLoader::eventLoop(){
       if(code<0||reason==MPV_END_FILE_REASON_ERROR){
         loadStatus_="failed";
         loadError_=errorMessage("mpv media",code<0?code:-1);
+      }else if(reason==MPV_END_FILE_REASON_REDIRECT){
+        const auto* end=static_cast<const mpv_event_end_file_head*>(event->data);
+        // Playlist expansion is a continuation, not HTTP redirect failure. Accept only
+        // the inserted child START_FILE; a late event must not take over this load.
+        loadStarted_=false;
+        eventEntryId_=-1;
+        if(end->playlist_insert_num_entries>0&&end->playlist_insert_id>=0){
+          activeEntryId_=end->playlist_insert_id;
+          loadStatus_="loading";
+          loadError_.clear();
+        }else{
+          loadStatus_="failed";
+          loadError_="redirect-empty-playlist";
+        }
+        continue;
       }else if(reason==MPV_END_FILE_REASON_EOF){
         loadStatus_="ended";
         loadError_="eof";

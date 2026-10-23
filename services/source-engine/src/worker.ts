@@ -1,6 +1,8 @@
-import type {SourceConfig,SourceEngineResponse} from '@free-new-desk/contracts';
+import {SourceConfigSchema,type SourceConfig,type SourceEngineResponse} from '@free-new-desk/contracts';
 import {SourceEngine} from './index.js';
 import {sourceFailure} from './source-failure.js';
+import {createRequire} from 'node:module';
+const engineVersion=String(createRequire(import.meta.url)('../package.json').version);
 interface ParentPortLike{on(event:'message',listener:(event:{data:unknown})=>void):void;postMessage(message:unknown):void;}
 interface IncomingRequest{id?:unknown;method?:unknown;params?:unknown;}
 const maybeParentPort=(process as typeof process&{parentPort?:ParentPortLike}).parentPort;if(!maybeParentPort)throw new Error('Source Engine must run as an Electron utility process');
@@ -15,10 +17,12 @@ async function handle(data:unknown):Promise<void>{
   if(method==='source.cancel'){const callId=typeof params.callId==='string'?params.callId:'';controllers.get(callId)?.abort(new DOMException('Source call cancelled','AbortError'));parentPort.postMessage({id,result:{ok:true}} satisfies SourceEngineResponse);return;}
   const controller=new AbortController();controllers.set(id,controller);let response:SourceEngineResponse;
   try{
-    if(method==='source.ping')response={id,result:{ok:true,version:'1.4.16-s5'}};
-    else if(method==='source.configure'){engine.configureRuntime({...(typeof params.proxyBaseUrl==='string'?{proxyBaseUrl:params.proxyBaseUrl}:{}),...(typeof params.proxyToken==='string'?{proxyToken:params.proxyToken}:{}),...(typeof params.engineStoreDir==='string'?{engineStoreDir:params.engineStoreDir}:{})});response={id,result:{ok:true}};}
+    if(method==='source.ping')response={id,result:{ok:true,version:engineVersion}};
+    else if(method==='source.configure'){engine.configureRuntime({...(typeof params.proxyBaseUrl==='string'?{proxyBaseUrl:params.proxyBaseUrl}:{}),...(typeof params.proxyToken==='string'?{proxyToken:params.proxyToken}:{}),...(typeof params.engineStoreDir==='string'?{engineStoreDir:params.engineStoreDir}:{}),...(typeof params.executableTrustStoreDir==='string'?{executableTrustStoreDir:params.executableTrustStoreDir}:{})});response={id,result:{ok:true}};}
     else if(method==='source.replaceAll'){await engine.replaceSources(Array.isArray(params.sources)?params.sources as SourceConfig[]:[]);response={id,result:{ok:true}};}
     else if(method==='source.list')response={id,result:engine.listSources()};
+    else if(method==='source.prepareExecutable')response={id,result:await engine.prepareExecutable(SourceConfigSchema.parse(params.config))};
+    else if(method==='source.resetExecutable'){await engine.resetExecutable(stringParam(params,'sourceId'));response={id,result:{ok:true}};}
     else if(method==='source.home')response={id,result:await engine.getHome(stringParam(params,'sourceId'),controller.signal)};
     else if(method==='source.category')response={id,result:await engine.getCategory(stringParam(params,'sourceId'),stringParam(params,'categoryId'),typeof params.page==='number'?params.page:1,stringRecord(params.filters),controller.signal)};
     else if(method==='source.search')response={id,result:await engine.search(stringParam(params,'sourceId'),stringParam(params,'keyword'),typeof params.page==='number'?params.page:1,controller.signal)};

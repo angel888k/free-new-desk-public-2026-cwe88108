@@ -14,4 +14,10 @@ test('polluted album tags do not prevent a strong title and artist match',()=>{
 });
 test('same title by another artist must be rejected even with the same album',()=>{assert.equal(scoreMusicCandidate({title:'Song',artist:'Alice',album:'Hits'},{title:'Song',artist:'Bob',album:'Hits'}),0);});
 test('live and studio versions cannot share lyrics automatically',()=>{assert.equal(scoreMusicCandidate({title:'Song',artist:'Alice',album:'Hits'},{title:'Song (live)',artist:'Alice',album:'Hits'}),0);});
+test('CUE metadata candidates match the segment duration rather than the complete file',()=>{
+  const track={title:'Song',artist:'Alice',album:'Hits',duration:300,cueStart:120,cueEnd:180};
+  assert.equal(scoreMusicCandidate(track,{title:'Song',artist:'Alice',album:'Hits',duration:60}),1);
+  assert.equal(scoreMusicCandidate(track,{title:'Song',artist:'Alice',album:'Hits',duration:300}),0);
+  assert.equal(scoreMusicCandidate({...track,cueStart:240,cueEnd:undefined},{title:'Song',artist:'Alice',album:'Hits',duration:60}),1);
+});
 test('exact title and artist outrank partial or unrelated metadata',()=>{const track={title:'Hello World',artist:'Alice',album:'First'};const exact=scoreMusicCandidate(track,{title:'Hello World',artist:'Alice',album:'First'}),partial=scoreMusicCandidate(track,{title:'Hello',artist:'Alice',album:'First'}),wrong=scoreMusicCandidate(track,{title:'Different',artist:'Bob',album:'Other'});assert.ok(exact>partial);assert.ok(partial>wrong);assert.equal(exact,1);});

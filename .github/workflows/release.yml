@@ -1,13 +1,34 @@
 name: Release
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
 permissions:
   contents: write
 jobs:
   release:
+    if: "${{ github.ref_type == 'tag' }}"
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate release ref and version
+        shell: pwsh
+        env:
+          FND_REF_TYPE: ${{ github.ref_type }}
+          FND_REF_NAME: ${{ github.ref_name }}
+          FND_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $desktopVersion = (Get-Content apps/desktop/package.json -Raw | ConvertFrom-Json).version
+          $lockVersion = (Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable)['version']
+          if ($version -cnotmatch '^\d+\.\d+\.\d+$' -or $desktopVersion -cne $version -or $lockVersion -cne $version) { throw 'Final release requires matching stable versions.' }
+          $tag = "v$version"
+          if ($env:FND_REF_TYPE -eq 'tag') {
+            if ($env:FND_REF_NAME -cne $tag) { throw 'Tag/version mismatch.' }
+          } elseif ($env:FND_REF_TYPE -eq 'branch' -and $env:FND_REF_NAME -eq 'main') {
+            $title = ($env:FND_COMMIT_MESSAGE -split '\r?\n')[0]
+            if ($title -cne "release: $tag") { throw 'Explicit release commit title required.' }
+          } else { throw 'Invalid release ref.' }
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -15,9 +36,16 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '17.0.20+101' # Temurin 17.0.20.1+1 in Adoptium SemVer notation
       - name: Install locked dependencies
         run: npm ci
+      - name: Cache pinned Windows build tools
+        uses: actions/cache@v4
+        with:
+          path: third_party/build-tools/cache
+          key: build-tools-${{ runner.os }}-${{ hashFiles('third_party/build-tools/SOURCE.json') }}
+      - name: Validate pinned Windows build tools
+        run: npm run prepare:builder-tools
       - name: Verify architecture, types, tests and renderer build
         run: npm run verify
       - name: Configure PlayerHost x64
@@ -25,31 +53,77 @@ jobs:
       - name: Build PlayerHost x64
         run: cmake --build native/player-host/build --config Release
       - name: Prepare pinned LGPL libmpv runtime
-        shell: pwsh
-        run: ./scripts/prepare-mpv.ps1
+        uses: actions/cache@v4
+        with:
+          path: third_party/mpv/cache
+          key: mpv-win64-${{ hashFiles('third_party/mpv/win-x64/SOURCE.txt') }}
+      - name: Validate pinned LGPL libmpv runtime
+        run: npm run prepare:mpv
       - name: Test PlayerHost Named Pipe
         shell: pwsh
         run: ./scripts/test-player-host.ps1
+      - name: Verify PlayerHost pipe bounds and access controls
+        shell: pwsh
+        run: ./scripts/test-player-host-pipe-hardening.ps1
       - name: Validate controlled video seek and clock
         shell: pwsh
         run: ./scripts/test-player-host-video.ps1
       - name: Stress PlayerHost 100 media switches
         shell: pwsh
         run: ./scripts/test-player-host-switch-stress.ps1
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
-      - name: Package Windows x64
+      - name: Audit runtime and build dependencies
+        run: npm audit --audit-level=high
+      - name: Package unsigned Windows x64
         run: npm run package:win
+      - name: Record actual packaged runtimes
+        shell: pwsh
+        run: ./scripts/runtime-inventory.ps1 -ReleaseDir dist/releases -EvidencePath dist/releases/runtime-inventory.json
       - name: Smoke test packaged Electron renderer
         run: npm run smoke:packaged
       - name: Smoke test packaged UI navigation and screenshots
         shell: pwsh
         run: ./scripts/test-packaged-ui.ps1
-      - name: Checksums
+      - name: Test packaged lifecycle and recovery
         shell: pwsh
-        run: Get-ChildItem dist/releases/*.exe | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $([IO.Path]::GetFileName($_.Path))" } | Set-Content dist/releases/SHA256SUMS.txt
+        run: ./scripts/test-windows-lifecycle.ps1
+      - name: UI smoke at 125 percent DPI
+        shell: pwsh
+        run: ./scripts/test-packaged-ui.ps1 -Scale 1.25
+      - name: UI smoke at 150 percent DPI high contrast
+        shell: pwsh
+        run: ./scripts/test-packaged-ui.ps1 -Scale 1.5 -HighContrast
+      - name: UI smoke at 200 percent DPI high contrast
+        shell: pwsh
+        run: ./scripts/test-packaged-ui.ps1 -Scale 2 -HighContrast
+      - name: Verify unsigned release manifest and checksums
+        run: npm run release:manifest
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
-        run: gh release create "${{ github.ref_name }}" dist/releases/*.exe dist/releases/SHA256SUMS.txt --generate-notes
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tag = "v$version"
+          if ($env:GITHUB_REF_TYPE -eq 'branch') {
+            $existingTag = git ls-remote --tags origin "refs/tags/$tag"
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot check remote release tag.' }
+            if ($existingTag) { throw "Tag $tag already exists; refusing to replace its release." }
+          }
+          $assets = @(
+            "dist/releases/Free-New-Desk-Setup-$version-x64.exe",
+            "dist/releases/Free-New-Desk-Setup-$version-x64.exe.blockmap",
+            "dist/releases/Free-New-Desk-Portable-$version-x64.exe",
+            "dist/releases/SHA256SUMS.txt",
+            "dist/releases/release-manifest.json",
+            "dist/releases/runtime-inventory.json",
+            "dist/releases/latest.yml"
+          )
+          foreach ($asset in $assets) { if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) { throw "Missing asset: $asset" } }
+          $notes = "Free New Desk V1.4.18 for Windows x64.`n`nIMPORTANT: These Setup and Portable installers are UNSIGNED. Windows SmartScreen may warn that the publisher is unknown. No trusted publisher code-signature is claimed.`n`nIncluded: Windows Setup and Portable builds, SHA256 checksums, release manifest, runtime inventory, and update metadata."
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            if ($env:GITHUB_REF_NAME -cne $tag) { throw 'Release tag/version mismatch.' }
+            & gh release create $tag @assets --verify-tag --title "$tag (Unsigned)" --notes $notes
+          } else {
+            & gh release create $tag @assets --target $env:GITHUB_SHA --title "$tag (Unsigned)" --notes $notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Release creation failed: $LASTEXITCODE" }

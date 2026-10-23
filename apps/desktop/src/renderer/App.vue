@@ -3,11 +3,16 @@ import { computed,onBeforeUnmount,onMounted,ref } from 'vue';
 import { useRoute,useRouter } from 'vue-router';
 import type { PlayerStats } from '@free-new-desk/contracts';
 import {startMusicPlaybackController,stopMusicPlaybackController} from './stores/music-playback.js';
+import { useToastStore } from './stores/toast';
 import appIconUrl from './assets/app-icon.png';
+import ToastHost from './components/ToastHost.vue';
+import {usePageStateStore} from './stores/page-state';
+import CommandPalette from './components/CommandPalette.vue';
+import AppIcon from './components/AppIcon.vue';
 
 const route=useRoute();
 const router=useRouter();
-const version=ref('1.4.17-rc.3');
+const version=ref('1.5.0');
 const isPackaged=ref(false);
 const sourceHealthy=ref<boolean|null>(null);
 const navigatingPath=ref('');
@@ -16,20 +21,26 @@ const renderMode=ref(localStorage.getItem('player.hwdec')==='off'?'软件解码�
 const playerStats=ref<PlayerStats|null>(null);
 const playerReachable=ref(false);
 let playerPoll:ReturnType<typeof setInterval>|undefined;
+let removeSourcesListener:(()=>void)|undefined;
 let removeHealthListener:(()=>void)|undefined;
 let removeNavigateListener:(()=>void)|undefined;
 let renderModeListener:((event:Event)=>void)|undefined;
+const toast=useToastStore();
 const items=[
-  {key:'home',path:'/',label:'首页',icon:'home'},
-  {key:'vod',path:'/vod',label:'点播',icon:'play'},
-  {key:'live',path:'/live',label:'直播',icon:'tv'},
-  {key:'music',path:'/music',label:'音乐',icon:'music'},
-  {key:'player',path:'/player',label:'播放器',icon:'circle-play'},
-  {key:'search',path:'/search',label:'搜索',icon:'search'},
-  {key:'favorites',path:'/favorites',label:'收藏',icon:'star'},
-  {key:'history',path:'/history',label:'历史',icon:'clock'},
-  {key:'sources',path:'/sources',label:'来源',icon:'layers'},
-  {key:'settings',path:'/settings',label:'设置',icon:'settings'}
+  {key:'home',path:'/',label:'首页',icon:'nav-home'},
+  {key:'vod',path:'/vod',label:'点播',icon:'nav-vod'},
+  {key:'live',path:'/live',label:'直播',icon:'nav-live'},
+  {key:'player',path:'/player',label:'播放器',icon:'nav-player'},
+  {key:'music',path:'/music',label:'音乐',icon:'nav-music'}
+] as const;
+const myItems=[
+  {key:'search',path:'/search',label:'搜索',icon:'nav-search'},
+  {key:'favorites',path:'/favorites',label:'收藏',icon:'nav-star'},
+  {key:'history',path:'/history',label:'历史',icon:'nav-clock'}
+] as const;
+const systemItems=[
+  {key:'sources',path:'/sources',label:'来源',icon:'nav-layers'},
+  {key:'settings',path:'/settings',label:'设置',icon:'nav-settings'}
 ] as const;
 const current=computed(()=>route.path);
 async function navigate(path:string){if(navigatingPath.value||current.value===path)return;navigatingPath.value=path;const started=performance.now();try{await router.push(path);const elapsed=performance.now()-started;void window.desktop.diagnostics.recordPerformance('navigationMs',elapsed).catch(()=>false);if(window.desktop.app.isUiSmoke()&&elapsed>100)throw new Error(`Navigation exceeded 100ms budget: ${path} ${elapsed.toFixed(1)}ms`);}finally{requestAnimationFrame(()=>{navigatingPath.value='';});}}
@@ -38,11 +49,15 @@ async function refreshPlayer(){try{playerStats.value=await window.desktop.playba
 async function playerControl(command:'pause'|'mute',value:boolean){await window.desktop.playback.control({command,value});await refreshPlayer();}
 async function setVolume(event:Event){const value=Number((event.target as HTMLInputElement).value);await window.desktop.playback.control({command:'volume',value});await refreshPlayer();}
 const mediaStatus=computed(()=>!playerReachable.value?'播放器未连接':playerStats.value?.duration||playerStats.value?.path?(playerStats.value?.paused?'已暂停':'播放中'):'空闲');
+const nowPlayingName=computed(()=>{const path=playerStats.value?.path;if(!path)return'';const segment=path.split(/[\\/]/).filter(Boolean).pop()??'';return segment.replace(/\.[a-z0-9]{1,5}$/i,'')||segment;});
+const nowPlayingVisible=computed(()=>Boolean(playerReachable.value&&playerStats.value?.path));
 function focusPageSearch(event:KeyboardEvent){if(!(event.ctrlKey||event.metaKey)||event.key.toLowerCase()!=='f')return;const target=event.target as HTMLElement|null;if(target&&['INPUT','SELECT','TEXTAREA'].includes(target.tagName))return;const input=document.querySelector<HTMLElement>('.content [data-search-input]:not([disabled])');if(!input)return;event.preventDefault();menuOpen.value=false;input.focus();input.scrollIntoView({block:'nearest'});}
 
 onMounted(async()=>{
+  const pageState=usePageStateStore();
+  removeSourcesListener=window.desktop.source.onChanged(()=>{for(const key of ['vod','live','search'])pageState.clear(key);});
   startMusicPlaybackController();
-  try{const info=await window.desktop.app.getInfo();version.value=info.version;isPackaged.value=info.packaged;}catch{/* footer keeps v1.4.14 fallback */}
+  try{const info=await window.desktop.app.getInfo();version.value=info.version;isPackaged.value=info.packaged;}catch{/* footer keeps the current release fallback */}
   try{sourceHealthy.value=await window.desktop.source.ping();}catch{sourceHealthy.value=false;}
   removeHealthListener=window.desktop.source.onHealthChanged(value=>{sourceHealthy.value=value.ok;});
   removeNavigateListener=window.desktop.app.onNavigate(path=>{void router.push(path);});
@@ -51,7 +66,7 @@ onMounted(async()=>{
   window.addEventListener('keydown',focusPageSearch);
   await refreshPlayer();playerPoll=setInterval(refreshPlayer,1500);
 });
-onBeforeUnmount(()=>{stopMusicPlaybackController();removeHealthListener?.();removeNavigateListener?.();if(playerPoll)clearInterval(playerPoll);if(renderModeListener)window.removeEventListener('fnd:render-mode',renderModeListener);window.removeEventListener('keydown',focusPageSearch);});
+onBeforeUnmount(()=>{stopMusicPlaybackController();removeSourcesListener?.();removeHealthListener?.();removeNavigateListener?.();if(playerPoll)clearInterval(playerPoll);if(renderModeListener)window.removeEventListener('fnd:render-mode',renderModeListener);window.removeEventListener('keydown',focusPageSearch);});
 </script>
 
 <template>
@@ -60,42 +75,68 @@ onBeforeUnmount(()=>{stopMusicPlaybackController();removeHealthListener?.();remo
       <div class="app-brand">
         <img class="brand-mark" :src="appIconUrl" alt="" aria-hidden="true"/>
         <strong>Free New Desk</strong>
-      </div><div class="title-actions"><button class="title-menu-button" aria-label="扩展菜单" :aria-expanded="menuOpen" @click="menuOpen=!menuOpen">•••</button><div v-if="menuOpen" class="title-menu"><button @click="appAction('reload')">刷新界面</button><button v-if="!isPackaged" @click="appAction('devtools')">开发者工具</button><button @click="appAction('quit')">退出应用</button></div></div>
+      </div><div class="title-actions"><button class="title-menu-button" aria-label="扩展菜单" :aria-expanded="menuOpen" @click="menuOpen=!menuOpen"><AppIcon name="action-more" :size="18"/></button><div v-if="menuOpen" class="title-menu"><button @click="appAction('reload')">刷新界面</button><button v-if="!isPackaged" @click="appAction('devtools')">开发者工具</button><button @click="appAction('quit')">退出应用</button></div></div>
     </header>
 
     <aside class="navigation" aria-label="主导航">
       <nav class="nav-stack">
+        <div class="nav-section">内 容</div>
         <button v-for="item in items" :key="item.path" class="nav-item" :data-smoke-key="item.key" :class="{active:current===item.path}" :disabled="navigatingPath===item.path" :aria-busy="navigatingPath===item.path" @click="navigate(item.path)">
-          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <template v-if="item.icon==='home'"><path d="M3 11.2 12 4l9 7.2v8.3a1.5 1.5 0 0 1-1.5 1.5h-5v-6h-5v6h-5A1.5 1.5 0 0 1 3 19.5Z"/></template>
-            <template v-else-if="item.icon==='play'"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4Z"/></template>
-            <template v-else-if="item.icon==='tv'"><rect x="3" y="6" width="18" height="14" rx="2"/><path d="m9 2 3 4 3-4M8 11l6 3-6 3Z"/></template>
-            <template v-else-if="item.icon==='music'"><path d="M10 5v11.2a3 3 0 1 1-2-2.83V7l10-2v9.2a3 3 0 1 1-2-2.83V3.7Z"/></template>
-            <template v-else-if="item.icon==='search'"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></template>
-            <template v-else-if="item.icon==='star'"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9Z"/></template>
-            <template v-else-if="item.icon==='clock'"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></template>
-            <template v-else-if="item.icon==='layers'"><path d="m12 3 9 5-9 5-9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></template>
-            <template v-else-if="item.icon==='circle-play'"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4Z"/></template>
-            <template v-else><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M4.9 4.9 7 7m10 10 2.1 2.1M2 12h3m14 0h3M4.9 19.1 7 17m10-10 2.1-2.1"/></template>
-          </svg>
+          <AppIcon class="nav-icon" :name="item.icon" :size="20"/>
+          <span>{{item.label}}</span>
+        </button>
+        <div class="nav-section">我 的</div>
+        <button v-for="item in myItems" :key="item.path" class="nav-item" :data-smoke-key="item.key" :class="{active:current===item.path}" :disabled="navigatingPath===item.path" :aria-busy="navigatingPath===item.path" @click="navigate(item.path)">
+          <AppIcon class="nav-icon" :name="item.icon" :size="20"/>
+          <span>{{item.label}}</span>
+          <span v-if="item.key==='search'" class="nav-kbd" aria-hidden="true">Ctrl K</span>
+        </button>
+        <div class="nav-section">系 统</div>
+        <button v-for="item in systemItems" :key="item.path" class="nav-item" :data-smoke-key="item.key" :class="{active:current===item.path}" :disabled="navigatingPath===item.path" :aria-busy="navigatingPath===item.path" @click="navigate(item.path)">
+          <AppIcon class="nav-icon" :name="item.icon" :size="20"/>
           <span>{{item.label}}</span>
         </button>
       </nav>
-      <div class="sidebar-spacer"/>
+      <div class="side-spacer"/>
+      <div v-if="nowPlayingVisible&&current!=='/'" class="now-playing-card">
+        <div class="np-row">
+          <span class="np-glyph" aria-hidden="true"><AppIcon :name="playerStats?.paused?'player-pause':'player-play'" :size="14"/></span>
+          <div class="np-copy"><strong :title="nowPlayingName">{{nowPlayingName}}</strong><small>{{mediaStatus}}</small></div>
+        </div>
+        <div class="np-actions"><button class="np-return" @click="navigate('/player')">返回播放器</button></div>
+      </div>
     </aside>
 
     <main class="content"><RouterView/></main>
 
     <footer class="statusbar" role="status" aria-live="polite">
       <span>来源引擎：<b :class="{good:sourceHealthy,danger:sourceHealthy===false}">{{sourceHealthy===null?'检测中':sourceHealthy?'正常':'异常'}}</b></span>
-      <span class="statusbar-spacer"/>
-      <span>播放器内核：PlayerHost C++ x64</span>
-      <span>渲染模式：{{renderMode}}</span>
       <span>媒体状态：{{mediaStatus}}</span>
-      <span>当前版本：V{{version}}</span>
+      <span class="status-detail" tabindex="0">
+        <span>运行详情</span>
+        <span class="status-detail-pop" role="tooltip">
+          <span>当前版本</span><b>V{{version}}<template v-if="isPackaged"> · 安装版</template></b>
+          <span>播放器内核</span><b>PlayerHost C++ x64</b>
+          <span>渲染模式</span><b>{{renderMode}}</b>
+          <span>媒体状态</span><b>{{mediaStatus}}</b>
+          <span>诊断与日志</span><b>设置 → 系统诊断</b>
+        </span>
+      </span>
+      <span>V{{version}}</span>
     </footer>
   </div>
+  <ToastHost/>
+  <CommandPalette/>
 </template>
 <style scoped>
 .title-actions{position:relative;margin-left:auto;align-self:center;-webkit-app-region:no-drag}.title-menu-button{width:38px;height:30px;border:0;border-radius:7px;background:transparent;font-weight:800;letter-spacing:2px}.title-menu{position:absolute;right:8px;top:34px;z-index:1000;min-width:140px;padding:6px;border:1px solid var(--line);border-radius:10px;background:var(--surface);box-shadow:0 12px 30px rgba(0,0,0,.18)}.title-menu button{display:block;width:100%;padding:8px 10px;border:0;border-radius:6px;background:transparent;text-align:left}.title-menu button:hover{background:var(--surface-2)}.nav-item:disabled{opacity:.6;cursor:wait}.brand-mark svg path{fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.now-playing-card{border:1px solid var(--line);border-radius:10px;background:var(--surface);padding:10px 11px;display:grid;gap:8px;flex:none;margin-bottom:2px}
+.now-playing-card .np-row{display:grid;grid-template-columns:26px 1fr;gap:9px;align-items:center;min-width:0}
+.now-playing-card .np-glyph{width:26px;height:26px;border-radius:7px;background:var(--accent);color:#fff;display:grid;place-items:center;font-size:10px;flex:none}
+.now-playing-card .np-copy{min-width:0;display:flex;flex-direction:column;gap:2px}
+.now-playing-card .np-copy strong{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.now-playing-card .np-copy small{font-size:10.5px;color:var(--muted)}
+.now-playing-card .np-actions{display:flex}
+.now-playing-card .np-return{flex:1;height:26px;border:1px solid var(--line);border-radius:7px;background:var(--surface-2);font-size:11px;color:var(--accent-strong)}
+.now-playing-card .np-return:hover{background:var(--accent-soft)}
 </style>

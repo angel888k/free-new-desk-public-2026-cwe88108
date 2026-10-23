@@ -1,12 +1,19 @@
 import http,{type IncomingMessage,type ServerResponse} from 'node:http';
 import {once} from 'node:events';
 import {randomBytes} from 'node:crypto';
+import {readTextBody} from './text-body.js';
 
 export interface ProxyDescriptor{baseUrl:string;token:string;}
 
 function mediaPlaylist(type:string,url:string):boolean{return/mpegurl/i.test(type)||/\.m3u8(?:\?|$)/i.test(url);}
 const enc=(value:string)=>Buffer.from(value,'utf8').toString('base64url');
 const dec=(value:string)=>Buffer.from(value,'base64url').toString('utf8');
+const HLS_MAX_BYTES=8*1024*1024,SUBTITLE_MAX_BYTES=16*1024*1024,HLS_REWRITE_MAX_BYTES=32*1024*1024;
+const crossOriginHeaders=new Set(['user-agent','accept','accept-language','range','if-range','if-none-match','if-modified-since']);
+function scopedHeaders(headers:Record<string,string>,from:string,to:string):Record<string,string>{
+  if(new URL(from).origin===new URL(to).origin)return{...headers};
+  return Object.fromEntries(Object.entries(headers).filter(([name])=>crossOriginHeaders.has(name.toLowerCase())));
+}
 
 function headersFrom(url:URL):Record<string,string>{
   const raw=url.searchParams.get('h');if(!raw)return{};
@@ -43,13 +50,41 @@ export class ProxyService{
   }
   stop():Promise<void>{const server=this.#server;this.#server=undefined;this.#baseUrl='';this.#token='';if(!server)return Promise.resolve();return new Promise(resolve=>server.close(()=>resolve()));}
   #rewriteManifest(body:string,target:string,headers:Record<string,string>):string{
-    const base=new URL(target);
-    return body.split(/\r?\n/).map(line=>{if(!line.trim())return line;if(line.startsWith('#'))return line.replace(/URI="([^"]+)"/g,(_all,uri:string)=>{try{return`URI="${this.url(new URL(uri,base).toString(),headers)}"`;}catch{return`URI="${uri}"`;}});try{return this.url(new URL(line.trim(),base).toString(),headers);}catch{return line;}}).join('\n');
+    const base=new URL(target);let bytes=0;
+    const childUrl=(uri:string)=>{const child=new URL(uri,base).toString();return this.url(child,scopedHeaders(headers,target,child));};
+    return body.split(/\r?\n/).map((line,index)=>{
+      let rewritten=line;
+      if(line.trim()){
+        if(line.startsWith('#'))rewritten=line.replace(/URI="([^"]+)"/g,(_all,uri:string)=>{try{return`URI="${childUrl(uri)}"`;}catch{return`URI="${uri}"`;}});
+        else try{rewritten=childUrl(line.trim());}catch{}
+      }
+      bytes+=Buffer.byteLength(rewritten)+(index?1:0);
+      if(bytes>HLS_REWRITE_MAX_BYTES)throw new Error('Proxy rewritten HLS exceeds byte safety limit');
+      return rewritten;
+    }).join('\n');
+  }
+  async #fetch(target:string,headers:Record<string,string>,method:string,signal:AbortSignal):Promise<{response:Response;url:string;headers:Record<string,string>}>{
+    let url=target;
+    const initial=new Headers(headers);
+    if(!initial.has('user-agent'))initial.set('user-agent','FreeNewDesk/1.5.0');
+    let forwarded:Record<string,string>=Object.fromEntries(initial);
+    for(let redirects=0;redirects<=8;redirects+=1){
+      if(!/^https?:$/.test(new URL(url).protocol))throw new Error('Proxy redirect protocol is not supported');
+      const response=await fetch(url,{redirect:'manual',signal,method,headers:forwarded});
+      if(![301,302,303,307,308].includes(response.status))return{response,url:response.url||url,headers:forwarded};
+      const location=response.headers.get('location');
+      if(!location)return{response,url:response.url||url,headers:forwarded};
+      await response.body?.cancel();
+      if(redirects===8)throw new Error('Proxy redirect limit exceeded');
+      const next=new URL(location,url).toString();
+      forwarded=scopedHeaders(forwarded,url,next);url=next;
+    }
+    throw new Error('Proxy redirect limit exceeded');
   }
   async #handle(request:IncomingMessage,response:ServerResponse):Promise<void>{
     const method=(request.method??'GET').toUpperCase();
     if(method!=='GET'&&method!=='HEAD'){response.writeHead(405,{allow:'GET, HEAD'});response.end();return;}
-    const controller=new AbortController();let completed=false;
+    const controller=new AbortController();let completed=false,upstreamTimer:NodeJS.Timeout|undefined;
     const abort=()=>{if(!completed&&!controller.signal.aborted)controller.abort(new DOMException('Proxy client disconnected','AbortError'));};
     request.once('aborted',abort);response.once('close',()=>{if(!response.writableEnded)abort();});
     try{
@@ -58,23 +93,23 @@ export class ProxyService{
       if(incoming.pathname!=='/proxy'&&incoming.pathname!=='/subtitle'){response.writeHead(404);response.end();return;}
       const target=incoming.searchParams.get('u');if(!target||!/^https?:\/\//i.test(target)){response.writeHead(400);response.end('Invalid target');return;}
       const forwarded={...headersFrom(incoming),...requestHeaders(request)};
-      const headerTimer=setTimeout(()=>controller.abort(new DOMException('Proxy upstream header timeout','TimeoutError')),20_000);
-      let upstream:Response;
-      try{upstream=await fetch(target,{redirect:'follow',signal:controller.signal,method,headers:{'user-agent':'FreeNewDesk/1.4.16',...forwarded}});}finally{clearTimeout(headerTimer);}
+      upstreamTimer=setTimeout(()=>controller.abort(new DOMException('Proxy upstream request timeout','TimeoutError')),20_000);
+      const fetched=await this.#fetch(target,forwarded,method,controller.signal),upstream=fetched.response;
       const type=upstream.headers.get('content-type')??'application/octet-stream';
       if(method==='HEAD'){response.writeHead(upstream.status,responseHeaders(upstream,type,true));response.end();completed=true;return;}
       if(incoming.pathname==='/subtitle'){
-        const text=await upstream.text();const body=/\.srt(?:\?|$)/i.test(upstream.url||target)||/subrip/i.test(type)?srtToVtt(text):text;
+        const text=await readTextBody(upstream,controller.signal,SUBTITLE_MAX_BYTES);const body=/\.srt(?:\?|$)/i.test(fetched.url)||/subrip/i.test(type)?srtToVtt(text):text;
         response.writeHead(upstream.status,{'content-type':body.startsWith('WEBVTT')?'text/vtt; charset=utf-8':type,'cache-control':'no-store'});response.end(body);completed=true;return;
       }
-      if(mediaPlaylist(type,upstream.url||target)){
-        const body=this.#rewriteManifest(await upstream.text(),upstream.url||target,forwarded);
+      if(mediaPlaylist(type,fetched.url)){
+        const body=this.#rewriteManifest(await readTextBody(upstream,controller.signal,HLS_MAX_BYTES),fetched.url,fetched.headers);
         response.writeHead(upstream.status,responseHeaders(upstream,type,false));response.end(body);completed=true;return;
       }
+      clearTimeout(upstreamTimer);upstreamTimer=undefined;
       response.writeHead(upstream.status,responseHeaders(upstream,type,true));
       if(upstream.body){
         const idle=()=>setTimeout(()=>controller.abort(new DOMException('Proxy upstream body stalled','TimeoutError')),30_000);let idleTimer=idle();
-        try{for await(const chunk of upstream.body as AsyncIterable<Uint8Array>){clearTimeout(idleTimer);if(!response.write(chunk))await once(response,'drain');idleTimer=idle();}}finally{clearTimeout(idleTimer);}
+        try{for await(const chunk of upstream.body as AsyncIterable<Uint8Array>){clearTimeout(idleTimer);if(!response.write(chunk))await once(response,'drain',{signal:controller.signal});idleTimer=idle();}}finally{clearTimeout(idleTimer);}
       }
       response.end();completed=true;
     }catch(error){
@@ -82,6 +117,6 @@ export class ProxyService{
       const message=error instanceof Error?error.message:String(error);
       if(response.headersSent){response.destroy(error instanceof Error?error:new Error(message));return;}
       response.writeHead(502,{'content-type':'application/json'});response.end(JSON.stringify({error:message}));
-    }finally{completed=true;request.removeListener('aborted',abort);}
+    }finally{clearTimeout(upstreamTimer);completed=true;request.removeListener('aborted',abort);}
   }
 }

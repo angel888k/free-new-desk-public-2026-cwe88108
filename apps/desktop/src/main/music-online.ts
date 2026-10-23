@@ -2,9 +2,10 @@ import { createHash,randomUUID } from 'node:crypto';
 import { mkdir,readFile,writeFile,rename,readdir,stat,unlink } from 'node:fs/promises';
 import path from 'node:path';
 import type { MusicTrack } from '@free-new-desk/contracts';
-type Identity=Pick<MusicTrack,'title'|'artist'|'album'>&{duration?:number};
+import {musicTrackDuration} from '@free-new-desk/contracts';
+type Identity=Pick<MusicTrack,'title'|'artist'|'album'|'duration'|'cueStart'|'cueEnd'>;
 const MAX_BYTES=8*1024*1024,TTL=30*86400000;
-const UA='Free-New-Desk/1.4.17 (+https://github.com/cwe88108/free-new-desk-public)';
+const UA='Free-New-Desk-Public/1.5.0 (+https://github.com/cwe88108/free-new-desk-public)';
 const gates=new Map<string,Promise<unknown>>(),lastCall=new Map<string,number>();
 const pending=new Map<string,Promise<unknown>>();
 export function sanitizeMusicMetadata(value:string):string{
@@ -18,10 +19,11 @@ export function scoreMusicCandidate(track:Identity,candidate:{title?:string|unde
   const versions=(v:string)=>[...v.toLowerCase().matchAll(/\blive\b|\bremix\b|\binstrumental\b|现场|伴奏|翻唱/g)].map(m=>m[0]).sort().join('|');
   if(versions(track.title)!==versions(candidate.title??''))return 0;
   if(sanitizeMusicMetadata(track.album)&&candidate.album&&!/download|promo|https?:|www\.|资源|无损/i.test(track.album)&&normalizeMusicMatch(sanitizeMusicMetadata(track.album))!==normalizeMusicMatch(candidate.album))return 0;
-  if(track.duration&&candidate.duration&&Math.abs(track.duration-candidate.duration)>Math.max(3,track.duration*.02))return 0;
+  const duration=musicTrackDuration(track.duration??0,track);
+  if(duration&&candidate.duration&&Math.abs(duration-candidate.duration)>Math.max(3,duration*.02))return 0;
   return Math.round((title+artist+fieldScore(sanitizeMusicMetadata(track.album),candidate.album??'',.1))*1000)/1000;
 }
-function key(track:Identity):string{return createHash('sha256').update(JSON.stringify(['match-v4',track.title,track.artist,track.album,track.duration??null])).digest('hex');}
+function key(track:Identity):string{return createHash('sha256').update(JSON.stringify(['match-v5',track.title,track.artist,track.album,musicTrackDuration(track.duration??0,track)||null])).digest('hex');}
 async function single<T>(id:string,task:()=>Promise<T>):Promise<T>{const old=pending.get(id);if(old)return old as Promise<T>;const work=task();pending.set(id,work);try{return await work;}finally{if(pending.get(id)===work)pending.delete(id);}}
 async function request(url:string):Promise<{bytes:Buffer;type:string;status:number}>{
   const host=new URL(url).hostname,interval=host==='musicbrainz.org'?1100:300;

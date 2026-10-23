@@ -10,6 +10,7 @@ let started=false,inFlight:Promise<void>|undefined,anchorAt=0,anchor=0,frame=0,s
 function reset(){clockStats.value=null;clockLoadStatus.value=null;anchorAt=0;anchor=0;clockPosition.value=0;clockStale.value=true;seekState=undefined;seekSerial++;}
 function runtime(value:PlaybackSessionSnapshot){const previous=clockRuntime.value;if(value.generation<previous.generation||value.updatedAt<previous.updatedAt)return;if(value.requestId!==previous.requestId||value.loadId!==previous.loadId)reset();clockRuntime.value=value;}
 function acceptSample(sample:PlayerStats,current:PlaybackSessionSnapshot):boolean{
+  if(sample.sampleFresh!==true||sample.sampleState&&sample.sampleState!=='fresh'||sample.samplePositionStable===false){clockDiagnostics.rejected++;clockDiagnostics.reason='sample-not-fresh-and-stable';return false;}
   if(!sample.sampleValid||!sample.hostEpoch||sample.loadId!==current.loadId||sample.requestId!==current.requestId||!Number.isSafeInteger(sample.sampleSeq)){clockDiagnostics.rejected++;clockDiagnostics.reason=!sample.sampleValid?'sample-invalid':'session-mismatch';return false;}
   const old=clockStats.value;if(old&&old.hostEpoch===sample.hostEpoch&&(old.sampleSeq??0)>=(sample.sampleSeq??0))return false;
   if(seekState){

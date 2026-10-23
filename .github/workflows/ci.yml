@@ -1,6 +1,9 @@
 name: CI
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 permissions:
   contents: read
 jobs:
@@ -17,8 +20,15 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '17.0.20+101' # Temurin 17.0.20.1+1 in Adoptium SemVer notation
       - name: Install locked dependencies
         run: npm ci
+      - name: Cache pinned archive verification tools
+        uses: actions/cache@v4
+        with:
+          path: third_party/build-tools/cache
+          key: build-tools-${{ runner.os }}-${{ hashFiles('third_party/build-tools/SOURCE.json') }}
+      - name: Validate pinned archive verification tools
+        run: npm run prepare:builder-tools
       - name: Verify architecture, types, tests and renderer build
         run: npm run verify

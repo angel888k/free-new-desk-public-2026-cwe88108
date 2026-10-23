@@ -130,6 +130,6 @@ try {
 
   Write-Host 'PlayerHost async accept/load-status, concurrent query, stop latency, real media and failure integration passed.'
 } finally {
-  if (!$process.HasExited) { Stop-Process -Id $process.Id -Force }
+  if (!$process.HasExited) { Stop-Process -Id $process.Id -Force; if (-not $process.WaitForExit(10000)) { throw 'Dedicated test player did not exit.' } }
   Remove-Item $wav -Force -ErrorAction SilentlyContinue
 }

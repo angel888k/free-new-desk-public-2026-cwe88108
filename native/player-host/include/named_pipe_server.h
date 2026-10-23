@@ -1,6 +1,5 @@
 #pragma once
 #include <functional>
-#include <mutex>
 #include <string>
 class NamedPipeServer {
  public:
@@ -10,5 +9,4 @@ class NamedPipeServer {
  private:
   std::wstring pipeName_;
   Handler handler_;
-  std::mutex handlerMutex_;
 };

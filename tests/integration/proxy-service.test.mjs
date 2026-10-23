@@ -6,6 +6,20 @@ import {ProxyService} from '../../services/proxy-service/dist/index.js';
 async function listen(server){await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));return server.address().port;}
 async function startedProxy(t){const proxy=new ProxyService();const descriptor=await proxy.start();t.after(()=>proxy.stop());return{proxy,descriptor};}
 
+const syntheticHeaders={authorization:'Bearer source-fixture',cookie:'fixture=value',referer:'https://fixture.invalid/','x-source-token':'fixture-secret','user-agent':'scope-test-player'};
+async function sourceOrigins(t,respond){
+ const bases={},seen=[];
+ for(const name of ['a','b']){
+  const server=http.createServer((request,response)=>{seen.push({origin:name,path:request.url,headers:{...request.headers}});respond(name,request,response,bases);});
+  bases[name]=`http://127.0.0.1:${await listen(server)}`;t.after(()=>{server.closeAllConnections();server.close();});
+ }
+ return{bases,seen};
+}
+function assertCredentialScope(request,trusted){
+ assert.equal(request.headers['user-agent'],syntheticHeaders['user-agent']);
+ for(const name of ['authorization','cookie','referer','x-source-token'])assert.equal(request.headers[name],trusted?syntheticHeaders[name]:undefined,request.origin+request.path+' '+name);
+}
+
 test('proxy authenticates rewrites HLS and converts SRT subtitles',async t=>{
  let forwarded='';const upstream=http.createServer((req,res)=>{forwarded=String(req.headers.referer??'');if(req.url==='/master.m3u8'){res.setHeader('content-type','application/vnd.apple.mpegurl');res.end('#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\nseg.ts');return;}if(req.url==='/sub.srt'){res.setHeader('content-type','application/x-subrip');res.end('1\n00:00:01,000 --> 00:00:02,000\nHello');return;}res.end('data');});
  const port=await listen(upstream);t.after(()=>upstream.close());const{proxy,descriptor}=await startedProxy(t);const target=`http://127.0.0.1:${port}/master.m3u8`;
@@ -40,4 +54,36 @@ test('proxy aborts upstream streaming when the client disconnects',async t=>{
  const port=await listen(upstream);t.after(()=>{if(timer)clearInterval(timer);upstream.close();});const{proxy,descriptor}=await startedProxy(t);const target=new URL(proxy.url(`http://127.0.0.1:${port}/stream.mp4`));
  await new Promise((resolve,reject)=>{const req=http.get({hostname:'127.0.0.1',port:Number(target.port),path:target.pathname+target.search,headers:{Authorization:`Bearer ${descriptor.token}`}},res=>{res.once('data',()=>{req.destroy();resolve();});});req.once('error',error=>{if(error.code==='ECONNRESET')resolve();else reject(error);});});
  const deadline=Date.now()+2000;while(!upstreamClosed&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));assert.equal(upstreamClosed,true);
+});
+
+test('real TCP HLS keys, maps, variants and segments preserve same-origin authentication and strip cross-origin credentials',async t=>{
+ const {bases,seen}=await sourceOrigins(t,(name,req,res,origins)=>{
+  if(name==='a'&&['/master.m3u8','/init.mp4','/same.ts'].includes(req.url)&&req.headers.authorization!==syntheticHeaders.authorization){res.writeHead(401);res.end();return;}
+  if(req.url==='/master.m3u8'){res.setHeader('content-type','application/vnd.apple.mpegurl');res.end(`#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="${origins.b}/key.bin"\n#EXT-X-MAP:URI="init.mp4"\n${origins.b}/variant.m3u8\nsame.ts`);return;}
+  if(req.url==='/variant.m3u8'){res.setHeader('content-type','application/vnd.apple.mpegurl');res.end(`#EXTM3U\ncdn.ts\n${origins.a}/returned.ts`);return;}
+  res.end('fixture-media-bytes');
+ });
+ const {proxy,descriptor}=await startedProxy(t),headers={authorization:`Bearer ${descriptor.token}`};
+ const response=await fetch(proxy.url(bases.a+'/master.m3u8',syntheticHeaders),{headers});assert.equal(response.status,200);
+ const children=body=>[...body.matchAll(/URI="([^"]+)"/g)].map(match=>match[1]).concat(body.split('\n').filter(line=>line&&!line.startsWith('#')));
+ const urls=children(await response.text());assert.equal(urls.length,4);
+ for(const url of urls){const child=await fetch(url,{headers});assert.equal(child.status,200);const body=await child.text();if(child.headers.get('content-type')?.includes('mpegurl'))for(const nested of children(body)){const segment=await fetch(nested,{headers});assert.equal(segment.status,200);await segment.text();}}
+ assert.equal(seen.length,7);
+ for(const request of seen)assertCredentialScope(request,request.origin==='a'&&['/master.m3u8','/init.mp4','/same.ts'].includes(request.path));
+ assert.ok(seen.some(request=>request.origin==='a'&&request.path==='/returned.ts'),'nested cross-origin playlist must not resurrect initial credentials on returning to the original origin');
+});
+
+test('real TCP redirect round trips never restore stripped credentials and resolve children against the final path',async t=>{
+ const {bases,seen}=await sourceOrigins(t,(name,req,res,origins)=>{
+  const location=req.url==='/entry'?'/same':req.url==='/same'?origins.b+'/return':req.url==='/return'?origins.a+'/final/master.m3u8':undefined;
+  if(location){res.writeHead(307,{location});res.end();return;}
+  if(req.url==='/final/master.m3u8'){res.setHeader('content-type','application/vnd.apple.mpegurl');res.end('#EXTM3U\nsegment.ts');return;}
+  if(req.url==='/final/segment.ts'){res.end('fixture-segment');return;}
+  res.writeHead(404);res.end();
+ });
+ const {proxy,descriptor}=await startedProxy(t),headers={authorization:`Bearer ${descriptor.token}`};
+ const response=await fetch(proxy.url(bases.a+'/entry',syntheticHeaders),{headers});assert.equal(response.status,200);
+ const child=(await response.text()).split('\n').find(line=>line&&!line.startsWith('#'));assert.ok(child);assert.equal(new URL(child).searchParams.get('u'),bases.a+'/final/segment.ts');
+ const segment=await fetch(child,{headers});assert.equal(segment.status,200);assert.equal(await segment.text(),'fixture-segment');
+ assert.equal(seen.length,5);for(const request of seen)assertCredentialScope(request,request.origin==='a'&&['/entry','/same'].includes(request.path));
 });

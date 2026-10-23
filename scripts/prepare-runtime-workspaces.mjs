@@ -2,6 +2,7 @@ import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promi
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { sourceProvenance } from './release-manifest.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const stagingRoot=path.join(root,'.packaging','runtime-node-modules');
@@ -29,6 +30,10 @@ for(const workspaceRoot of workspaceRoots){
 }const externalSeen=new Set();const queue=[];
 function enqueueFrom(manifest,requestedBy){for(const[name]of Object.entries(manifest.dependencies??{}))if(!name.startsWith('@free-new-desk/'))queue.push({name,required:true,requestedBy});for(const[name]of Object.entries(manifest.optionalDependencies??{}))if(!name.startsWith('@free-new-desk/'))queue.push({name,required:false,requestedBy});for(const[name]of Object.entries(manifest.peerDependencies??{}))if(!name.startsWith('@free-new-desk/'))queue.push({name,required:false,requestedBy});}
 for(const manifest of workspaceManifests)enqueueFrom(manifest,manifest.name);
+// Desktop production dependencies must be covered by the same runtime manifest.
+for(const relative of ['package.json','apps/desktop/package.json']){
+  const manifest=await readJson(path.join(root,relative));enqueueFrom(manifest,manifest.name);
+}
 while(queue.length){
   const item=queue.shift();if(!item||externalSeen.has(item.name))continue;
   const source=path.join(root,'node_modules',...packageParts(item.name)),manifestPath=path.join(source,'package.json');
@@ -52,6 +57,8 @@ const stagedNames=new Set(staged.map(item=>item.name));const missing=[...require
 if(missing.length)throw new Error(`Runtime staging is missing workspace packages: ${missing.join(', ')}`);
 if(!stagedNames.has('@free-new-desk/contracts'))throw new Error('Runtime staging did not include @free-new-desk/contracts');const report={generatedAt:new Date().toISOString(),node:process.version,packages:staged.sort((a,b)=>a.name.localeCompare(b.name)),externalPackages:externalStaged.sort((a,b)=>a.name.localeCompare(b.name)),requiredImports:[...required].sort()};
 await writeFile(path.join(root,'.packaging','runtime-workspaces.json'),`${JSON.stringify(report,null,2)}\n`,'utf8');
+await mkdir(path.join(root,'dist'),{recursive:true});
+await writeFile(path.join(root,'dist','build-provenance.json'),JSON.stringify(await sourceProvenance(root),null,2)+'\n');
 console.log(`Staged ${staged.length} internal runtime workspaces and ${externalStaged.length} external runtime packages for Electron packaging.`);
 for(const item of report.packages)console.log(`  ${item.name}@${item.version} <- ${item.source}`);
 for(const item of report.externalPackages)console.log(`  ${item.name}@${item.version} <- runtime dependency of ${item.requestedBy}`);

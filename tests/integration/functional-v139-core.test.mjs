@@ -70,7 +70,7 @@ test('source audit exposes five stages and concurrent same-source audits are ded
   await engine.replaceSources([{id:'s1',name:'fixture',kind:'T1_JSON',endpoint:`http://127.0.0.1:${address.port}/api`,enabled:true,trust:'A'}]);
   const [a,b]=await Promise.all([engine.audit('s1'),engine.audit('s1')]);
   for(const result of [a,b]){
-    assert.equal(result.ok,true);
+    assert.equal(result.ok,true,`audit stages: ${JSON.stringify(result.stages)}`);
     assert.deepEqual(result.stages.map(stage=>stage.stage),['home','category','search','detail','play']);
     assert.equal(result.stages.length,5);
   }

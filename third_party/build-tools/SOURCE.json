@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "checkedAt": "2026-10-08",
+  "sevenZip": {
+    "version": "26.04",
+    "release": "https://github.com/ip7z/7zip/releases/tag/26.04",
+    "platforms": {
+      "win32-x64": {
+        "url": "https://github.com/ip7z/7zip/releases/download/26.04/7z2604-extra.7z",
+        "assetApi": "https://api.github.com/repos/ip7z/7zip/releases/assets/614879011",
+        "archiveSha256": "dc4b11d3399db18b063630137145f5585d8f7ac847bf3639bd1185d7d1f7cee0",
+        "executable": "x64/7za.exe",
+        "executableSha256": "15d4c788c148e3677e2fc1c4a01f191fb6669eba4f6acf8a465f0f1a6f1e1260"
+      },
+      "linux-x64": {
+        "url": "https://github.com/ip7z/7zip/releases/download/26.04/7z2604-linux-x64.tar.xz",
+        "assetApi": "https://api.github.com/repos/ip7z/7zip/releases/assets/614879045",
+        "archiveSha256": "fc0327ba27e89bd086cf426dff17d77de582953cdbbc10a6576540a06853ffcd",
+        "executable": "7zz",
+        "executableSha256": "d1bc79f00e9815b24048ab167690bdd1dbc387de7dbc47e8d75d68689e49cf4f"
+      }
+    }
+  },
+  "nsis": {
+    "version": "3.12",
+    "toolset": "1.2.1",
+    "release": "https://github.com/electron-userland/electron-builder-binaries/releases/tag/nsis%401.2.1",
+    "upstream": "https://nsis.sourceforge.io/Docs/AppendixF.html",
+    "url": "https://github.com/electron-userland/electron-builder-binaries/releases/download/nsis%401.2.1/nsis-bundle-3.12.tar.gz",
+    "assetApi": "https://api.github.com/repos/electron-userland/electron-builder-binaries/releases/assets/427976275",
+    "archiveSha256": "56997fdefe25e7928a1a68b4583d08b240b66cf660234053b20131a74cc082f4",
+    "treeSha256": "0ff2d31f35daa72eb934e993f1acdcd8c7a30edfcd7baa9bedc270fcd1ec476c",
+    "windowsTreeSha256": "6862a946044dc73c3a4b4998f9271969d67e34523e017a195b8c144d03124ed7",
+    "windowsNativeExecutableSha256": "7144fb5e10113752a92c743b55d0d7bea9c842d4d9cdbfe3d63b092f3c9debf3",
+    "windowsExecutable": "windows/makensis.exe",
+    "windowsExecutableSha256": "b043e554afefbfc56315669d0b4779793aeae67f0f2a7a790e2ea91f05298eff",
+    "notes": "Current supported electron-builder unified toolset. NSIS 3.12 includes the documented Low IL temporary directory privilege-escalation fix; upstream 3.13 is newer and is not claimed as bundled."
+  },
+  "verification": "Archive SHA256 values were matched against official GitHub release asset digests before native tar extraction. Extracted executable and complete NSIS tree hashes are pinned below the trusted archive."
+}

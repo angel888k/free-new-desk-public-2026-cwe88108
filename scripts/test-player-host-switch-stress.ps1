@@ -18,7 +18,16 @@ function Wait-Loaded([string]$LoadId,[int]$TimeoutMs=30000){
 $process=Start-Process -FilePath $exe -ArgumentList @('--pipe',$pipe,'--test-audio-output','null') -PassThru -WindowStyle Hidden
 try{
  [void](Invoke-Player @{id='stress-ping';method='player.ping';params=@{}})
- $process.Refresh();$baseline=[long]$process.WorkingSet64;$mediaUri=([Uri]$video).AbsoluteUri;$lastLoad=''
+ $mediaUri=([Uri]$video).AbsoluteUri
+ # The initial media open is a cold-start measurement, not one of the 100 hot switches.
+ $coldWatch=[Diagnostics.Stopwatch]::StartNew()
+ $cold=(Invoke-Player @{id='cold-start';method='player.load';params=@{url=$mediaUri;profile='vod'}}).result
+ $coldWatch.Stop()
+ if(-not $cold.accepted -or -not $cold.loadId){throw 'Cold-start media load was not accepted'}
+ if($coldWatch.ElapsedMilliseconds -gt 1500){throw "Cold-start accept exceeded 1500ms: $($coldWatch.ElapsedMilliseconds)ms"}
+ Wait-Loaded ([string]$cold.loadId)
+ $process.Refresh();$baseline=[long]$process.WorkingSet64;$lastLoad=''
+ Write-Host ("Cold-start accept completed in {0}ms; measuring 100 subsequent hot switches at <=250ms each." -f $coldWatch.ElapsedMilliseconds)
  for($i=1;$i -le 100;$i++){
   $watch=[Diagnostics.Stopwatch]::StartNew();$accepted=(Invoke-Player @{id="switch-$i";method='player.load';params=@{url=$mediaUri;profile='vod'}}).result;$watch.Stop()
   if(-not $accepted.accepted -or -not $accepted.loadId){throw "Switch $i was not accepted"}
@@ -32,4 +41,4 @@ try{
  $stop=(Invoke-Player @{id='stress-stop';method='player.command';params=@{command='stop'}}).result;if(-not $stop.ok){throw 'PlayerHost stop failed after stress'}
  $ping=(Invoke-Player @{id='stress-ping-final';method='player.ping';params=@{}}).result;if(-not $ping.ok){throw 'PlayerHost became unresponsive after stress'}
  Write-Host ("PlayerHost 100-switch stress passed: baseline={0:N1} MiB, final={1:N1} MiB, growth={2:N1} MiB." -f ($baseline/1MB),($after/1MB),($growth/1MB))
-} finally {if($process -and -not $process.HasExited){Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue};Remove-Item $video -Force -ErrorAction SilentlyContinue}
+} finally {if($process -and -not $process.HasExited){Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue;[void]$process.WaitForExit(10000)};Remove-Item $video -Force -ErrorAction SilentlyContinue}

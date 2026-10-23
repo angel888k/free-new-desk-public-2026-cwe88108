@@ -1,1 +1,1 @@
-tests/fixtures/drpy2/** -whitespace
+tests/fixtures/drpy2/** text eol=lf -whitespace

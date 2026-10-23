@@ -13,6 +13,7 @@ const mockAdapter=(revision,destroyed)=>({
   search:async(_q,page=1)=>({page,items:[]}),getPlay:async()=>({url:'https://media.example/a.mp4',parse:false}),
   destroy:async()=>{destroyed.push(revision);}
 });
+
 test('v1.4.14 S2 CookieJar honors path secure expiry domain and account isolation',async()=>{
   const store=new RequestContextStore(),a=store.bind('source',{configRevision:'r1',accountProfile:'a'}),b=store.bind('source',{configRevision:'r1',accountProfile:'b'});
   await store.captureFor(a,'https://media.example.com/api/login',new Headers({'set-cookie':'sid=api; Path=/api; Secure; Max-Age=3600'}));

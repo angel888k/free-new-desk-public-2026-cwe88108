@@ -1,8 +1,12 @@
 name: Windows x64 Build
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -15,9 +19,16 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '17.0.20+101' # Temurin 17.0.20.1+1 in Adoptium SemVer notation
       - name: Install locked dependencies
         run: npm ci
+      - name: Cache pinned Windows build tools
+        uses: actions/cache@v4
+        with:
+          path: third_party/build-tools/cache
+          key: build-tools-${{ runner.os }}-${{ hashFiles('third_party/build-tools/SOURCE.json') }}
+      - name: Validate pinned Windows build tools
+        run: npm run prepare:builder-tools
       - name: Verify TypeScript and tests
         run: npm run verify
       - name: Configure PlayerHost x64
@@ -25,21 +36,31 @@ jobs:
       - name: Build PlayerHost x64
         run: cmake --build native/player-host/build --config Release
       - name: Prepare pinned LGPL libmpv runtime
-        shell: pwsh
-        run: ./scripts/prepare-mpv.ps1
+        uses: actions/cache@v4
+        with:
+          path: third_party/mpv/cache
+          key: mpv-win64-${{ hashFiles('third_party/mpv/win-x64/SOURCE.txt') }}
+      - name: Validate pinned LGPL libmpv runtime
+        run: npm run prepare:mpv
       - name: Test PlayerHost Named Pipe
         shell: pwsh
         run: ./scripts/test-player-host.ps1
+      - name: Verify PlayerHost pipe bounds and access controls
+        shell: pwsh
+        run: ./scripts/test-player-host-pipe-hardening.ps1
       - name: Validate controlled video seek and clock
         shell: pwsh
         run: ./scripts/test-player-host-video.ps1
       - name: Stress PlayerHost 100 media switches
         shell: pwsh
         run: ./scripts/test-player-host-switch-stress.ps1
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+      - name: Audit runtime and build dependencies
+        run: npm audit --audit-level=high
       - name: Package Windows x64
         run: npm run package:win
+      - name: Record actual packaged runtimes
+        shell: pwsh
+        run: ./scripts/runtime-inventory.ps1 -ReleaseDir dist/releases -EvidencePath dist/releases/runtime-inventory.json
       - name: Smoke test packaged Electron renderer
         run: npm run smoke:packaged
       - name: Test packaged lifecycle and recovery
@@ -64,6 +85,13 @@ jobs:
           $env:FND_HIGH_CONTRAST = '1'
           $env:FND_CAPTURE_IMAGES = '0'
           ./scripts/test-packaged-ui.ps1
+      - name: Smoke test packaged UI at 200% DPI and high contrast
+        shell: pwsh
+        run: |
+          $env:FND_DPI_SCALE = '2'
+          $env:FND_HIGH_CONTRAST = '1'
+          $env:FND_CAPTURE_IMAGES = '0'
+          ./scripts/test-packaged-ui.ps1
       - name: Resolve package version
         id: package_version
         shell: pwsh
@@ -78,36 +106,33 @@ jobs:
           path: dist/ui-smoke/*.jpg
           if-no-files-found: error
           retention-days: 14
-      - name: Verify Windows x64 package exists
+      - name: Resolve verified Windows release assets
+        id: release_assets
         shell: pwsh
         run: |
-          $packages = @(Get-ChildItem 'dist/releases/*.exe' -ErrorAction Stop)
-          if ($packages.Count -lt 1) {
-            throw 'No Windows x64 package was produced.'
+          npm run release:manifest
+          if ($LASTEXITCODE -ne 0) { throw 'Final release manifest validation failed.' }
+          $version = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+          $manifest = Get-Content -LiteralPath dist/releases/release-manifest.json -Raw | ConvertFrom-Json
+          $expectedNames = @("Free-New-Desk-Setup-$version-x64.exe", "Free-New-Desk-Portable-$version-x64.exe")
+          $assets = @($manifest.assets)
+          if ($manifest.version -ne $version -or $assets.Count -ne 2 -or @($assets.name | Select-Object -Unique).Count -ne 2) {
+            throw 'Release manifest must list exactly two unique artifacts for the current version.'
           }
-          $packages | ForEach-Object { Write-Host "Package ready: $($_.FullName)" }
-      - name: Publish Windows x64 package to GitHub Release
-        if: github.ref == 'refs/heads/main'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $tag = "v$version"
-          $title = "Free New Desk v$version"
-
-          gh release view $tag --repo "${{ github.repository }}" *> $null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --repo "${{ github.repository }}" --target "${{ github.sha }}" --title $title --generate-notes
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to create release $tag."
-            }
+          $paths = foreach ($asset in $assets) {
+            if ($asset.name -cnotin $expectedNames) { throw "Unexpected release asset: $($asset.name)" }
+            $file = Join-Path 'dist/releases' $asset.name
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing release asset: $file" }
+            if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $asset.sha256) { throw "Release asset hash mismatch: $file" }
+            $file.Replace('\', '/')
           }
-
-          $packages = @(Get-ChildItem 'dist/releases/*.exe' -ErrorAction Stop)
-          foreach ($package in $packages) {
-            gh release upload $tag $package.FullName --repo "${{ github.repository }}" --clobber
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to upload $($package.Name) to release $tag."
-            }
-          }
+          $paths += @('dist/releases/latest.yml', 'dist/releases/release-manifest.json', 'dist/releases/SHA256SUMS.txt', 'dist/releases/runtime-inventory.json')
+          foreach ($file in $paths) { if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing release file: $file" } }
+          $delimiter = 'release_paths_' + [Guid]::NewGuid().ToString('N')
+          @("paths<<$delimiter") + $paths + @($delimiter) | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+      - name: Preserve verified Windows build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-${{ github.sha }}
+          path: ${{ steps.release_assets.outputs.paths }}
+          if-no-files-found: error

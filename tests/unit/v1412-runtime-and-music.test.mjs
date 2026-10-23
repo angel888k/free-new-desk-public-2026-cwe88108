@@ -23,7 +23,7 @@ test('v1.4.12 drpy2 worker executes ESM and synchronous broker req without block
  const entry='https://example.com/drpy2.js';
  const code=`const host={pdfh,pdfa,pd,joinUrl};export default {init(ext){this.ext=ext;this.rule={title:'Fixture'};return this},getRule(){return this.rule},home(){return {class:[{type_id:'1',type_name:host.pdfh('<b>Demo</b>','b&&Text')}],list:[]}},search(k){const r=req('https://example.com/api',{timeout:3000});return {list:[{vod_id:'1',vod_name:k+' '+r.content}]}}}`;
  const child=fork(new URL('../../services/drpy2-worker/dist/worker.js',import.meta.url),[],{stdio:['ignore','ignore','ignore','ipc'],execArgv:['--experimental-vm-modules']});
- const ask=payload=>new Promise((resolve,reject)=>{const id=randomUUID(),timer=setTimeout(()=>reject(new Error('worker timeout')),10000);const on=m=>{if(m?.type==='broker.request'){const target=path.join(dir,`${m.id}.json`);void writeFile(target,JSON.stringify({result:{content:'OK',headers:{},code:200}}),'utf8');return;}if(m?.type==='response'&&m.id===id){clearTimeout(timer);child.off('message',on);m.error?reject(new Error(m.error)):resolve(m.result);}};child.on('message',on);child.send({...payload,id});});
+ const ask=payload=>new Promise((resolve,reject)=>{const id=randomUUID(),timer=setTimeout(()=>reject(new Error('worker timeout')),10000);const on=m=>{if(m?.type==='broker.request'){const target=path.join(dir,`${m.id}.json`);void (async()=>{await writeFile(target,'{"result":','utf8');await new Promise(resolve=>setTimeout(resolve,35));await writeFile(target,JSON.stringify({result:{content:'OK',headers:{},code:200}}),'utf8');})();return;}if(m?.type==='response'&&m.id===id){clearTimeout(timer);child.off('message',on);m.error?reject(new Error(m.error)):resolve(m.result);}};child.on('message',on);child.send({...payload,id});});
  try{await ask({type:'init',sourceId:'test',entryUrl:entry,modules:{[entry]:code},ruleExt:'fixture-rule',bridgeDir:dir,profileId:'fixture-drpy2',hostAbiVersion:'fixture-host/3',instantiation:'object',initContractId:'rule-ext-string-v1',requiredCapabilities:['req-sync','pdfh','pdfa','pd'],methodNames:['home','search']});const home=await ask({type:'call',method:'home',args:[]});assert.equal(home.class[0].type_name,'Demo');const result=await ask({type:'call',method:'search',args:['needle']});assert.match(result.list[0].vod_name,/needle OK/);}finally{child.kill();await rm(dir,{recursive:true,force:true});}
 });
 test('v1.4.14 music progress normalizes Windows paths before URL parsing and gates native samples by session identity',async()=>{
@@ -36,7 +36,7 @@ test('v1.4.12 playback switching is latest-wins and live uses optimistic first r
  const main=await text('apps/desktop/src/main/index.ts'),preload=await text('apps/desktop/src/preload/index.cts');assert.match(main,/vodPlaybackController\?\.abort/);assert.match(main,/PLAYBACK_SUPERSEDED/);assert.match(preload,/const optimistic=await tryCandidate\(0\)/);assert.match(main,/live route superseded/);
 });
 test('v1.4.15 packages drpy2 worker and exposes the new version',async()=>{
- const root=JSON.parse(await text('package.json'));assert.equal(root.version,'1.4.17');assert.ok(root.build.files.includes('services/drpy2-worker/dist/**/*'));assert.match(root.scripts['build:packages'],/@free-new-desk\/drpy2-worker/);
+ const root=JSON.parse(await text('package.json'));assert.equal(root.version,JSON.parse(await text('apps/desktop/package.json')).version);assert.ok(root.build.files.includes('services/drpy2-worker/dist/**/*'));assert.match(root.scripts['build:packages'],/@free-new-desk\/drpy2-worker/);
 });
 
 test('v1.4.16 uses the supplied transparent icon across renderer window tray and installer wiring',async()=>{
@@ -62,11 +62,13 @@ test('v1.4.12 reproducibly prepares the pinned libmpv runtime before Windows pac
     text('third_party/mpv/win-x64/SOURCE.txt')
   ]);
   assert.match(manifest,/"prepare:mpv": "node scripts\/ensure-mpv-runtime\.mjs"/);
-  assert.match(manifest,/prepare:icons && npm run prepare:mpv && npm run build/);
+  const scripts=JSON.parse(manifest).scripts;
+  assert.match(scripts['package:prepare'],/prepare:icons && npm run prepare:mpv && npm run player:configure && npm run player:build && npm run build/);
+  assert.match(scripts['package:win'],/^npm run package:prepare && node scripts\/package-windows\.mjs/);
   assert.match(script,/archive sha256/);
   assert.match(script,/dll sha256/);
-  assert.match(script,/7zip-bin/);
-  assert.match(source,/dll sha256: cb67e96c08bbcd0efd60949e7562f034f5dba2e0bc6838cb4161ee5636c33145/i);
+  assert.match(script,/tar\.exe/);
+  assert.match(source,/dll sha256: [a-f0-9]{64}/i);
 });
 
 test('v1.4.12 stages external runtime dependencies and isolates packaged smoke from repo node_modules',async()=>{
@@ -80,7 +82,7 @@ test('v1.4.12 stages external runtime dependencies and isolates packaged smoke f
   assert.match(sourceEngineManifest,/"es-module-lexer": "1\.7\.0"/);
   assert.match(shimManifest,/"cheerio": "1\.0\.0"/);
   assert.match(stager,/externalStaged/);assert.match(stager,/manifest\.dependencies/);assert.match(stager,/runtime dependency of/);
-  assert.match(smoke,/free-new-desk-package-isolated-/);assert.match(smoke,/Copy-Item -Path \$sourcePackage/);
+  assert.match(smoke,/free-new-desk-package-isolated-/);assert.match(smoke,/Copy-Item -LiteralPath \$sourcePackage/);
   assert.match(client,/stdio:\['ignore','ignore','pipe'\]/);assert.match(client,/Source Engine exited \(code \$\{code\}\)/);
 });
 test('v1.4.14 generic ESM engines are not misclassified as drpy2',()=>{

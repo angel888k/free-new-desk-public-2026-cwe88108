@@ -7,6 +7,7 @@ function coded(code:string,message:string,recoverable:boolean,stage:NonNullable<
 
 export function sourceFailure(error:unknown):AppError{
   const message=messageOf(error),upper=message.toUpperCase();
+  if(/SOURCE_EXECUTABLE_NOT_APPROVED|JAR_CLASSPATH_UNREVIEWABLE/.test(upper))return coded('SOURCE_EXECUTABLE_NOT_APPROVED',message,false,'runtime','auth','open-diagnostics');
   if(error instanceof DOMException&&error.name==='AbortError'||/\bABORT(?:ED)?\b|CANCELLED/.test(upper))return coded('SOURCE_CANCELLED',message,false,'request','cancelled');
   if(/TYPE4_DIALECT_UNKNOWN|DRPY_RUNTIME_UNSUPPORTED|DRPY_UNSUPPORTED_ENGINE/.test(upper))return coded('RUNTIME_PROFILE_UNKNOWN',message,false,'runtime','compatibility','select-profile');
   if(/TYPE4_RESULT_SHAPE_UNSUPPORTED|RESULT_SHAPE_UNSUPPORTED/.test(upper))return coded('RESULT_SHAPE_UNSUPPORTED',message,false,'resolve','compatibility','open-diagnostics');

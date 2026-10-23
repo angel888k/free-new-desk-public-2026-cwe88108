@@ -10,7 +10,7 @@ target_compile_definitions(player-host PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_M
 if(MSVC)
   target_compile_options(player-host PRIVATE /W4 /permissive- /EHsc)
 endif()
-target_link_libraries(player-host PRIVATE kernel32 user32)
+target_link_libraries(player-host PRIVATE kernel32 user32 advapi32)
 
 add_executable(smb-helper src/smb_helper.cpp)
 target_compile_features(smb-helper PRIVATE cxx_std_20)

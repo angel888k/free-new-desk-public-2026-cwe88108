@@ -5,10 +5,11 @@ export interface BrokerRequest{
   sourceId:string;url:string;method?:string;headers?:Record<string,string>;body?:string;
   timeoutMs?:number;retries?:number;signal?:AbortSignal;maxBytes?:number;redirect?:RequestRedirect;
   configRevision?:string;accountProfile?:string;contextRef?:string;allowSensitiveDefaults?:boolean;
+  validateUrl?:(url:string)=>void;
 }
 export type RequestOptions=BrokerRequest;
 export interface BrokerMetric{ok:boolean;status:number;latencyMs:number;bytes:number;}
-export {RequestContextStore} from './request-context-store.js';
+export {RequestContextStore,stripSensitiveRedirectHeaders} from './request-context-store.js';
 export type {RequestContextSpec} from './request-context-store.js';
 
 export function resolveUrl(base:string,value:string):string{return new URL(value,base).toString();}
@@ -73,6 +74,9 @@ export class RequestBroker{
     const defaults=this.#contexts.defaultHeadersFor(contextRef);
     const baseHeaders=requestHeaders(defaults,request.headers,request.allowSensitiveDefaults!==false);let redirected=false;
     for(let redirects=0;redirects<=MAX_REDIRECTS;redirects+=1){
+      const protocol=new URL(currentUrl).protocol;
+      if(protocol!=='http:'&&protocol!=='https:')throw new Error('SOURCE_PROTOCOL_DENIED');
+      request.validateUrl?.(currentUrl);
       const headers=new Headers(baseHeaders),cookie=await this.#contexts.cookieHeaderFor(contextRef,currentUrl);
       if(cookie&&!headers.has('cookie'))headers.set('cookie',cookie);
       if(!headers.has('user-agent'))headers.set('user-agent',browserUserAgent);
