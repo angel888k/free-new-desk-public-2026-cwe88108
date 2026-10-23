@@ -76,4 +76,5 @@ npm run package:win
 
 源码公开不等于采用宽松开源许可证，授权范围以 [LICENSE](LICENSE) 为准。第三方组件按其各自许可证使用，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。安全问题报告方式见 [SECURITY.md](SECURITY.md)，不要在公开 Issue 中披露凭据或可利用细节。
 
-V1.4.7 的历史兼容协议记录见 [兼容状态文档](docs/compatibility-v2-status.md)，历史数字不作为本版证据。
+V1.4.7 的 **V2 影视仓兼容状态**记录见 [兼容状态文档](docs/compatibility-v2-status.md)，历史数字不作为本版证据。
+
